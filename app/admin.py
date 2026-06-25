@@ -13,6 +13,8 @@ from app.models import (
     Booking,
     EcosystemMetric,
     Event,
+    LiveActivityFeed,
+    LiveActivityMetric,
     LiveBooking,
     LiveEvent,
     Sector,
@@ -28,6 +30,8 @@ from app.schemas import (
     EventCreate,
     EventRead,
     EventUpdate,
+    LiveActivityFeedRead,
+    LiveActivityMetricRead,
     SectorCreate,
     SectorRead,
     SectorUpdate,
@@ -820,5 +824,58 @@ def update_booking(
 
     return success_response(
         message="Booking updated successfully",
+        data=data,
+    )
+
+
+# ============================================================
+# Live Activity Admin API
+# Read-only endpoints.
+# ============================================================
+
+
+@router.get("/live-activity/metrics")
+def get_live_activity_metrics(db: Session = Depends(get_db)):
+    metrics = db.query(LiveActivityMetric).first()
+
+    if metrics is None:
+        return not_found_response(
+            message="Live activity metrics not found",
+            error_code="LIVE_ACTIVITY_METRICS_NOT_FOUND",
+        )
+
+    data = LiveActivityMetricRead.model_validate(metrics).model_dump()
+
+    return success_response(
+        message="Live activity metrics retrieved successfully",
+        data=data,
+    )
+
+
+@router.get("/live-activity/feed")
+def list_live_activity_feed(
+    limit: int = Query(default=20, ge=1, le=100),
+    category: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    query = db.query(LiveActivityFeed)
+
+    if category is not None:
+        query = query.filter(LiveActivityFeed.category == category)
+
+    feed_items = (
+        query
+        .order_by(LiveActivityFeed.occurred_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    data = [
+        LiveActivityFeedRead.model_validate(item).model_dump()
+        for item in feed_items
+    ]
+
+    return success_response(
+        message="Live activity feed retrieved successfully",
         data=data,
     )
