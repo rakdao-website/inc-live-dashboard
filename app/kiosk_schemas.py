@@ -82,4 +82,3 @@ class HeaderResponse(BaseModel):
     timezone: str
     status: str
     last_updated: datetime
-

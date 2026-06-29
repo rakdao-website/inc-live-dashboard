@@ -25,4 +25,14 @@ On first start, the API creates the SQLAlchemy tables and inserts the MVP sample
 - `GET /api/activity-feed` - latest live activity feed items
 - This service is deliberately read-only for the kiosk/dashboard. Admin routes for zone controls, events, and bookings are excluded so they can be implemented separately.
 
+## Backend structure
+
+- `app/main.py` starts FastAPI, runs startup setup, and includes routers.
+- `app/routers/kiosk.py` contains the read-only kiosk/dashboard endpoints.
+- `app/kiosk_schemas.py` contains the kiosk/dashboard response schemas.
+- `app/database.py` contains the SQLAlchemy database engine and session setup.
+- `app/models.py` contains the shared SQLAlchemy database table models.
+
+This keeps kiosk backend work separate from future admin backend work. An admin backend can be added later as its own router, for example `app/routers/admin.py`, without mixing it into the kiosk endpoints.
+
 The supplied [`INC.session.sql`](INC.session.sql) remains available for direct PostgreSQL setup and its reporting views. The API owns the normal application CRUD flow through SQLAlchemy.
