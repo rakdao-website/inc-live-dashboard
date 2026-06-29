@@ -1,1 +1,1 @@
-"""Innovation City Live Dashboard API."""
+"""Innovation City FastAPI backend package."""
