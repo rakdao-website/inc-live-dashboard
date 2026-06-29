@@ -4,6 +4,7 @@ from typing import Optional
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
@@ -13,17 +14,14 @@ from sqlalchemy import (
     Time,
     text,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-
-class Base(DeclarativeBase):
-    pass
+from app.database import Base
 
 
 # ============================================================
 # Writable base table models
 # These map to real tables from INC.session.sql.
-# Do not use these models to create or modify the database schema.
 # ============================================================
 
 
@@ -49,9 +47,16 @@ class Zone(Base):
         server_default=text("CURRENT_TIMESTAMP"),
     )
 
+    events: Mapped[list["Event"]] = relationship(back_populates="zone")
+    bookings: Mapped[list["Booking"]] = relationship(back_populates="zone")
+
 
 class EcosystemMetric(Base):
     __tablename__ = "ecosystem_metrics"
+    __table_args__ = (
+        CheckConstraint("active_companies >= 0"),
+        CheckConstraint("active_licenses >= 0"),
+    )
 
     ecosystem_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     snapshot_date: Mapped[date] = mapped_column(Date, nullable=False, unique=True)
@@ -67,6 +72,10 @@ class EcosystemMetric(Base):
 
 class Sector(Base):
     __tablename__ = "sectors"
+    __table_args__ = (
+        CheckConstraint("company_count >= 0"),
+        CheckConstraint("display_order > 0"),
+    )
 
     sector_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     sector_name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
@@ -81,15 +90,20 @@ class Sector(Base):
 
 class Event(Base):
     __tablename__ = "events"
+    __table_args__ = (
+        CheckConstraint("event_time_end > event_time_start"),
+        CheckConstraint("event_status IN ('upcoming', 'live', 'ended')"),
+    )
 
     event_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     zone_id: Mapped[str] = mapped_column(
         String(30),
         ForeignKey("zones.zone_id"),
         nullable=False,
+        index=True,
     )
     event_name: Mapped[str] = mapped_column(String(200), nullable=False)
-    event_date: Mapped[date] = mapped_column(Date, nullable=False)
+    event_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     event_time_start: Mapped[time] = mapped_column(Time, nullable=False)
     event_time_end: Mapped[time] = mapped_column(Time, nullable=False)
     event_location: Mapped[str] = mapped_column(
@@ -105,25 +119,42 @@ class Event(Base):
     event_organizer: Mapped[str] = mapped_column(String(150), nullable=False)
     event_attendee_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
+    zone: Mapped[Zone] = relationship(back_populates="events")
+
 
 class Booking(Base):
     __tablename__ = "bookings"
+    __table_args__ = (
+        CheckConstraint("booking_type IN ('meeting', 'studio', 'office')"),
+        CheckConstraint("booking_time_end > booking_time_start"),
+    )
 
     booking_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     zone_id: Mapped[str] = mapped_column(
         String(30),
         ForeignKey("zones.zone_id"),
         nullable=False,
+        index=True,
     )
     booking_type: Mapped[str] = mapped_column(String(10), nullable=False)
     booking_name: Mapped[str] = mapped_column(String(200), nullable=False)
-    booking_date: Mapped[date] = mapped_column(Date, nullable=False)
+    booking_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     booking_time_start: Mapped[time] = mapped_column(Time, nullable=False)
     booking_time_end: Mapped[time] = mapped_column(Time, nullable=False)
+
+    zone: Mapped[Zone] = relationship(back_populates="bookings")
 
 
 class ActivityFeed(Base):
     __tablename__ = "activity_feed"
+    __table_args__ = (
+        CheckConstraint("NOT (event_id IS NOT NULL AND booking_id IS NOT NULL)"),
+        CheckConstraint(
+            "activity_action IN ('occupied', 'available', 'starts_in_30', "
+            "'starts_in_15', 'starts_now', 'license_application_submitted')"
+        ),
+        CheckConstraint("category IN ('room', 'event', 'company', 'studio')"),
+    )
 
     feed_id: Mapped[str] = mapped_column(String(40), primary_key=True)
     zone_id: Mapped[Optional[str]] = mapped_column(
@@ -147,14 +178,18 @@ class ActivityFeed(Base):
         DateTime,
         nullable=False,
         server_default=text("CURRENT_TIMESTAMP"),
+        index=True,
     )
+
+    zone: Mapped[Optional[Zone]] = relationship(foreign_keys=[zone_id])
+    event: Mapped[Optional[Event]] = relationship(foreign_keys=[event_id])
+    booking: Mapped[Optional[Booking]] = relationship(foreign_keys=[booking_id])
 
 
 # ============================================================
 # Read-only view models
 # These map to PostgreSQL views from INC.session.sql.
 # They are for SELECT queries only.
-# Do not insert, update, or delete using these models.
 # ============================================================
 
 

@@ -1,1 +1,1 @@
-# app package
+"""Innovation City FastAPI backend package."""

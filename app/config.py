@@ -1,12 +1,16 @@
+from functools import lru_cache
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    app_name: str = "Innovation City Admin Backend"
+    app_name: str = "Innovation City Live Dashboard API"
     environment: str = "development"
     debug: bool = True
 
-    database_url: str
+    database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/INC_live_dashboard"
+    auto_create_tables: bool = False
+    seed_sample_data: bool = False
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -15,4 +19,9 @@ class Settings(BaseSettings):
     )
 
 
-settings = Settings()
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()
