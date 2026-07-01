@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
@@ -42,10 +42,22 @@ def activity_metrics_payload(db: Session, now=None) -> dict:
     occupied = sum(z["status"] == "occupied" for z in zone_data)
     active_meetings = sum(z["status"] == "occupied" and z["zone_type"] == "meeting_room" for z in zone_data)
     events_today_count = len(db.scalars(select(Event.event_id).where(Event.event_date == now.date())).all())
+    event_visitors = db.scalar(
+        select(func.coalesce(func.sum(Event.event_attendee_count), 0))
+        .where(Event.event_date == now.date())
+    ) or 0
+    booking_visitors = db.scalar(
+        select(func.count(Booking.booking_id))
+        .where(
+            Booking.booking_date == now.date(),
+            Booking.visitor_name.is_not(None),
+        )
+    ) or 0
     return {
         "zones_occupied": occupied,
         "zones_total": sum(z["is_bookable"] for z in zone_data),
         "meetings_active": active_meetings,
+        "visitors_count": int(event_visitors) + int(booking_visitors),
         "events_today_count": events_today_count,
     }
 
@@ -126,6 +138,9 @@ def list_bookings(db: Session = Depends(get_db)) -> list[dict]:
             "booking_id": booking.booking_id,
             "booking_type": booking.booking_type,
             "name": booking.booking_name,
+            "visitor_name": booking.visitor_name,
+            "visitor_phone": booking.visitor_phone,
+            "visitor_is_client": booking.visitor_is_client,
             "date": booking.booking_date,
             "start": booking.booking_time_start,
             "end": booking.booking_time_end,

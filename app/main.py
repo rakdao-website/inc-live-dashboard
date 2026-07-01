@@ -5,10 +5,11 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.admin import router as admin_router
+from app.admin import admin_login, router as admin_router
 from app.config import settings
 from app.database import Base, SessionLocal, check_database_connection, engine
 from app.routers.kiosk import router as kiosk_router
+from app.schemas import AdminLoginRequest
 from app.seed import seed_sample_data
 
 
@@ -108,6 +109,11 @@ def database_health_check() -> dict:
             "database": "connected",
         },
     )
+
+
+@app.post("/admin/auth/login")
+def admin_auth_login(payload: AdminLoginRequest):
+    return admin_login(payload)
 
 
 app.include_router(kiosk_router)

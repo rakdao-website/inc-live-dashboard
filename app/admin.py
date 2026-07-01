@@ -7,6 +7,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import get_db
 from app.models import (
     AdminZone,
@@ -21,6 +22,8 @@ from app.models import (
     Zone,
 )
 from app.schemas import (
+    AdminLoginRequest,
+    AdminLoginResponse,
     AdminZoneRead,
     BookingCreate,
     BookingRead,
@@ -130,6 +133,31 @@ def validate_bookable_open_zone(zone_id: str, db: Session) -> JSONResponse | Non
 def is_overlap_error(exc: SQLAlchemyError) -> bool:
     error_text = str(exc).lower()
     return "overlaps" in error_text or "overlap" in error_text
+
+
+@router.post("/auth/login")
+def admin_login(payload: AdminLoginRequest):
+    if (
+        payload.username != settings.admin_username
+        or payload.password != settings.admin_password
+    ):
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content=error_response(
+                message="Invalid username or password",
+                error_code="INVALID_ADMIN_LOGIN",
+            ),
+        )
+
+    user = AdminLoginResponse(
+        username=settings.admin_username,
+        role=settings.admin_role,
+    )
+
+    return success_response(
+        message="Signed in successfully",
+        data=user.model_dump(),
+    )
 
 
 @router.get("/health")
@@ -724,6 +752,11 @@ def create_booking(payload: BookingCreate, db: Session = Depends(get_db)):
         zone_id=payload.zone_id,
         booking_type=payload.booking_type,
         booking_name=payload.booking_name,
+        visitor_name=payload.visitor_name,
+        visitor_phone=payload.visitor_phone,
+        visitor_is_client=payload.visitor_is_client,
+        booking_start_date=payload.booking_start_date,
+        booking_end_date=payload.booking_end_date,
         booking_date=payload.booking_date,
         booking_time_start=payload.booking_time_start,
         booking_time_end=payload.booking_time_end,
@@ -779,6 +812,14 @@ def update_booking(
 
     target_start = update_data.get("booking_time_start", booking.booking_time_start)
     target_end = update_data.get("booking_time_end", booking.booking_time_end)
+    target_start_date = update_data.get("booking_start_date", booking.booking_start_date)
+    target_end_date = update_data.get("booking_end_date", booking.booking_end_date)
+
+    if target_end_date < target_start_date:
+        return bad_request_response(
+            message="booking_end_date must be on or after booking_start_date",
+            error_code="INVALID_DATE_RANGE",
+        )
 
     if target_end <= target_start:
         return bad_request_response(
@@ -795,8 +836,25 @@ def update_booking(
     if "booking_name" in update_data:
         booking.booking_name = update_data["booking_name"]
 
+    if "visitor_name" in update_data:
+        booking.visitor_name = update_data["visitor_name"]
+
+    if "visitor_phone" in update_data:
+        booking.visitor_phone = update_data["visitor_phone"]
+
+    if "visitor_is_client" in update_data:
+        booking.visitor_is_client = update_data["visitor_is_client"]
+
+    if "booking_start_date" in update_data:
+        booking.booking_start_date = update_data["booking_start_date"]
+
+    if "booking_end_date" in update_data:
+        booking.booking_end_date = update_data["booking_end_date"]
+
     if "booking_date" in update_data:
         booking.booking_date = update_data["booking_date"]
+    elif "booking_start_date" in update_data:
+        booking.booking_date = update_data["booking_start_date"]
 
     if "booking_time_start" in update_data:
         booking.booking_time_start = update_data["booking_time_start"]

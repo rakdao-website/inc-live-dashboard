@@ -11,6 +11,9 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/INC_live_dashboard"
     auto_create_tables: bool = False
     seed_sample_data: bool = False
+    admin_username: str = "admin"
+    admin_password: str = "admin123"
+    admin_role: str = "super_user"
 
     model_config = SettingsConfigDict(
         env_file=".env",

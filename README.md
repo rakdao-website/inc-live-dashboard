@@ -13,8 +13,12 @@ Open `http://127.0.0.1:8000/docs` for the interactive API documentation.
 
 On first start, the API creates the SQLAlchemy tables and inserts the MVP sample data. Set `AUTO_CREATE_TABLES=false` and `SEED_SAMPLE_DATA=false` in production or when using the existing `INC.session.sql` script.
 
+For local admin dashboard sign-in, use the values from `.env` or `.env.example`.
+The default development account is username `admin` and password `admin123`.
+
 ## Key endpoints
 
+- `POST /admin/auth/login` - local admin dashboard sign-in
 - `GET /api/header` - title, subtitle, date, time, timezone, and live status for the kiosk header
 - `GET /api/zones` - current Ground Floor map status
 - `GET /api/activity-metrics` - live activity/KPI cards such as occupied zones, active meetings, and today's events

@@ -23,6 +23,21 @@ class ErrorResponse(BaseModel):
 
 
 # ============================================================
+# Admin auth schemas
+# ============================================================
+
+
+class AdminLoginRequest(BaseModel):
+    username: str = Field(..., min_length=1, max_length=80)
+    password: str = Field(..., min_length=1, max_length=120)
+
+
+class AdminLoginResponse(BaseModel):
+    username: str
+    role: str
+
+
+# ============================================================
 # Zone schemas
 # ============================================================
 
@@ -67,6 +82,11 @@ class BookingRead(BaseModel):
     zone_id: str
     booking_type: BookingType
     booking_name: str
+    visitor_name: Optional[str] = None
+    visitor_phone: Optional[str] = None
+    visitor_is_client: bool = False
+    booking_start_date: date
+    booking_end_date: date
     booking_date: date
     booking_time_start: time
     booking_time_end: time
@@ -77,14 +97,23 @@ class BookingCreate(BaseModel):
     zone_id: str = Field(..., min_length=1, max_length=30)
     booking_type: BookingType
     booking_name: str = Field(..., min_length=1, max_length=200)
-    booking_date: date
+    visitor_name: Optional[str] = Field(default=None, max_length=150)
+    visitor_phone: Optional[str] = Field(default=None, max_length=40)
+    visitor_is_client: bool = False
+    booking_start_date: date
+    booking_end_date: date
+    booking_date: Optional[date] = None
     booking_time_start: time
     booking_time_end: time
 
     @model_validator(mode="after")
-    def validate_time_range(self):
+    def validate_date_and_time_range(self):
+        if self.booking_end_date < self.booking_start_date:
+            raise ValueError("booking_end_date must be on or after booking_start_date")
         if self.booking_time_end <= self.booking_time_start:
             raise ValueError("booking_time_end must be after booking_time_start")
+        if self.booking_date is None:
+            self.booking_date = self.booking_start_date
         return self
 
 
@@ -92,12 +121,23 @@ class BookingUpdate(BaseModel):
     zone_id: Optional[str] = Field(default=None, min_length=1, max_length=30)
     booking_type: Optional[BookingType] = None
     booking_name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    visitor_name: Optional[str] = Field(default=None, max_length=150)
+    visitor_phone: Optional[str] = Field(default=None, max_length=40)
+    visitor_is_client: Optional[bool] = None
+    booking_start_date: Optional[date] = None
+    booking_end_date: Optional[date] = None
     booking_date: Optional[date] = None
     booking_time_start: Optional[time] = None
     booking_time_end: Optional[time] = None
 
     @model_validator(mode="after")
-    def validate_time_range_if_complete(self):
+    def validate_date_and_time_range_if_complete(self):
+        if (
+            self.booking_start_date is not None
+            and self.booking_end_date is not None
+            and self.booking_end_date < self.booking_start_date
+        ):
+            raise ValueError("booking_end_date must be on or after booking_start_date")
         if (
             self.booking_time_start is not None
             and self.booking_time_end is not None
@@ -232,6 +272,7 @@ class LiveActivityMetricRead(BaseModel):
     meetings_active: int
     zones_occupied: int
     zones_total: int
+    visitors_count: int
     events_today_count: int
 
 
