@@ -145,6 +145,8 @@ class Booking(Base):
         nullable=False,
         server_default=text("FALSE"),
     )
+    booking_start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    booking_end_date: Mapped[date] = mapped_column(Date, nullable=False)
     booking_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     booking_time_start: Mapped[time] = mapped_column(Time, nullable=False)
     booking_time_end: Mapped[time] = mapped_column(Time, nullable=False)
@@ -233,6 +235,8 @@ class LiveBooking(Base):
     zone_id: Mapped[str] = mapped_column(String(30))
     booking_type: Mapped[str] = mapped_column(String(10))
     booking_name: Mapped[str] = mapped_column(String(200))
+    booking_start_date: Mapped[date] = mapped_column(Date)
+    booking_end_date: Mapped[date] = mapped_column(Date)
     visitor_name: Mapped[Optional[str]] = mapped_column(String(150))
     visitor_phone: Mapped[Optional[str]] = mapped_column(String(40))
     visitor_is_client: Mapped[bool] = mapped_column(Boolean)
