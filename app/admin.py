@@ -724,6 +724,9 @@ def create_booking(payload: BookingCreate, db: Session = Depends(get_db)):
         zone_id=payload.zone_id,
         booking_type=payload.booking_type,
         booking_name=payload.booking_name,
+        visitor_name=payload.visitor_name,
+        visitor_phone=payload.visitor_phone,
+        visitor_is_client=payload.visitor_is_client,
         booking_date=payload.booking_date,
         booking_time_start=payload.booking_time_start,
         booking_time_end=payload.booking_time_end,
@@ -794,6 +797,15 @@ def update_booking(
 
     if "booking_name" in update_data:
         booking.booking_name = update_data["booking_name"]
+
+    if "visitor_name" in update_data:
+        booking.visitor_name = update_data["visitor_name"]
+
+    if "visitor_phone" in update_data:
+        booking.visitor_phone = update_data["visitor_phone"]
+
+    if "visitor_is_client" in update_data:
+        booking.visitor_is_client = update_data["visitor_is_client"]
 
     if "booking_date" in update_data:
         booking.booking_date = update_data["booking_date"]

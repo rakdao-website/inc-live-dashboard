@@ -73,6 +73,9 @@ CREATE TABLE bookings (
   zone_id VARCHAR(30) NOT NULL REFERENCES zones(zone_id),
   booking_type VARCHAR(10) NOT NULL CHECK (booking_type IN ('meeting', 'studio', 'office')),
   booking_name VARCHAR(200) NOT NULL,
+  visitor_name VARCHAR(150),
+  visitor_phone VARCHAR(40),
+  visitor_is_client BOOLEAN NOT NULL DEFAULT FALSE,
   booking_date DATE NOT NULL,
   booking_time_start TIME NOT NULL,
   booking_time_end TIME NOT NULL,
@@ -223,6 +226,12 @@ SELECT
     SELECT COUNT(*) FROM zones WHERE is_bookable = TRUE
   ) AS zones_total,
   (
+    SELECT
+      COALESCE((SELECT SUM(event_attendee_count) FROM events WHERE event_date = CURRENT_DATE), 0)
+      +
+      COALESCE((SELECT COUNT(*) FROM bookings WHERE booking_date = CURRENT_DATE AND visitor_name IS NOT NULL), 0)
+  ) AS visitors_count,
+  (
     SELECT COUNT(*) FROM events WHERE event_date = CURRENT_DATE
   ) AS events_today_count;
 
@@ -245,6 +254,7 @@ FROM events e;
 CREATE VIEW live_bookings AS
 SELECT
   b.booking_id, b.zone_id, b.booking_type, b.booking_name, b.booking_date,
+  b.visitor_name, b.visitor_phone, b.visitor_is_client,
   b.booking_time_start, b.booking_time_end,
   CASE
     WHEN b.booking_date < CURRENT_DATE
@@ -397,18 +407,21 @@ VALUES
   ('EVT_1', 'Web3 Community Hour', CURRENT_DATE, '15:00', '16:00', 'Event Area', 'upcoming', 'Innovation City', NULL);
 
 INSERT INTO bookings
-  (zone_id, booking_type, booking_name, booking_date, booking_time_start, booking_time_end)
+  (zone_id, booking_type, booking_name, visitor_name, visitor_phone, visitor_is_client, booking_date, booking_time_start, booking_time_end)
 VALUES
-  ('MR_1', 'meeting', 'Investor Strategy Meeting', CURRENT_DATE, '11:00', '12:00'),
-  ('POD_1', 'studio', 'Founder Stories Podcast', CURRENT_DATE, '10:30', '12:30');
+  ('MR_1', 'meeting', 'Investor Strategy Meeting', 'Aisha Khan', '+971501234567', TRUE, CURRENT_DATE, '11:00', '12:00'),
+  ('POD_1', 'studio', 'Founder Stories Podcast', 'Omar Hassan', '+971551112233', FALSE, CURRENT_DATE, '10:30', '12:30');
 
 -- Current office occupancy: all 19 bookable offices are booked today.
 INSERT INTO bookings
-  (zone_id, booking_type, booking_name, booking_date, booking_time_start, booking_time_end)
+  (zone_id, booking_type, booking_name, visitor_name, visitor_phone, visitor_is_client, booking_date, booking_time_start, booking_time_end)
 SELECT
   'OFF_' || LPAD(office_number::TEXT, 2, '0'),
   'office',
   'Office ' || office_number || ' Booking',
+  NULL,
+  NULL,
+  TRUE,
   CURRENT_DATE,
   '00:00'::TIME,
   '23:59'::TIME

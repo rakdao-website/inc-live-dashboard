@@ -26,6 +26,7 @@ class ActivityMetricsRead(BaseModel):
     zones_occupied: int
     zones_total: int
     meetings_active: int
+    visitors_count: int
     events_today_count: int
 
 
@@ -63,6 +64,9 @@ class BookingRead(BaseModel):
     booking_id: int
     booking_type: str
     name: str
+    visitor_name: str | None = None
+    visitor_phone: str | None = None
+    visitor_is_client: bool = False
     date: date
     start: time
     end: time

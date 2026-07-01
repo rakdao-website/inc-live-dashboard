@@ -67,6 +67,9 @@ class BookingRead(BaseModel):
     zone_id: str
     booking_type: BookingType
     booking_name: str
+    visitor_name: Optional[str] = None
+    visitor_phone: Optional[str] = None
+    visitor_is_client: bool = False
     booking_date: date
     booking_time_start: time
     booking_time_end: time
@@ -77,6 +80,9 @@ class BookingCreate(BaseModel):
     zone_id: str = Field(..., min_length=1, max_length=30)
     booking_type: BookingType
     booking_name: str = Field(..., min_length=1, max_length=200)
+    visitor_name: Optional[str] = Field(default=None, max_length=150)
+    visitor_phone: Optional[str] = Field(default=None, max_length=40)
+    visitor_is_client: bool = False
     booking_date: date
     booking_time_start: time
     booking_time_end: time
@@ -92,6 +98,9 @@ class BookingUpdate(BaseModel):
     zone_id: Optional[str] = Field(default=None, min_length=1, max_length=30)
     booking_type: Optional[BookingType] = None
     booking_name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    visitor_name: Optional[str] = Field(default=None, max_length=150)
+    visitor_phone: Optional[str] = Field(default=None, max_length=40)
+    visitor_is_client: Optional[bool] = None
     booking_date: Optional[date] = None
     booking_time_start: Optional[time] = None
     booking_time_end: Optional[time] = None
@@ -232,6 +241,7 @@ class LiveActivityMetricRead(BaseModel):
     meetings_active: int
     zones_occupied: int
     zones_total: int
+    visitors_count: int
     events_today_count: int
 
 
