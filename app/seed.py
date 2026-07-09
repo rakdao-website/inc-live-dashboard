@@ -24,8 +24,8 @@ def seed_sample_data(db: Session) -> None:
     db.add_all([
         Event(zone_id="EVT_1", event_name="AI Founders Meetup", event_date=today, event_time_start=time(11), event_time_end=time(12,30), event_organizer="Innovation City", event_attendee_count=42),
         Event(zone_id="EVT_1", event_name="Web3 Community Hour", event_date=today, event_time_start=time(15), event_time_end=time(16), event_organizer="Innovation City"),
-        Booking(zone_id="MR_1", booking_type="meeting", booking_name="Investor Strategy Meeting", visitor_name="Aisha Khan", visitor_phone="+971501234567", visitor_is_client=True, booking_date=today, booking_time_start=time(11), booking_time_end=time(12)),
-        Booking(zone_id="POD_1", booking_type="studio", booking_name="Founder Stories Podcast", visitor_name="Omar Hassan", visitor_phone="+971551112233", visitor_is_client=False, booking_date=today, booking_time_start=time(10,30), booking_time_end=time(12,30)),
+        Booking(zone_id="MR_1", booking_type="meeting", booking_name="Investor Strategy Meeting", visitor_name="Aisha Khan", visitor_phone="+971501234567", visitor_email="aisha.khan@example.com", visitor_is_client=True, booking_start_date=today, booking_end_date=today, booking_date=today, booking_time_start=time(11), booking_time_end=time(12)),
+        Booking(zone_id="POD_1", booking_type="studio", booking_name="Founder Stories Podcast", visitor_name="Omar Hassan", visitor_phone="+971551112233", visitor_email="omar.hassan@example.com", visitor_is_client=False, booking_start_date=today, booking_end_date=today, booking_date=today, booking_time_start=time(10,30), booking_time_end=time(12,30)),
     ])
     db.flush()
     db.add_all([
