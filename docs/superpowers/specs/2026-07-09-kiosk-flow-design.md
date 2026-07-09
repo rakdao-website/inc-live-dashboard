@@ -8,7 +8,7 @@ Build the full Innovation City self-service kiosk flow across:
 - `INC_Live_Dashboard`: shared FastAPI backend and PostgreSQL schema.
 - `INC_Live_Dashboard_Admin_Frontend`: admin dashboard activity visibility.
 
-The existing map screen backend remains under `/api/...`, the existing admin backend remains under `/admin/...`, and the new kiosk backend will use `/api/kiosk/...`.
+The existing map screen backend remains under `/api`, the existing admin backend remains under `/admin`, and the new kiosk backend will use `/api/kiosk`.
 
 Face recognition and voice assistance are not implemented in this milestone. They will be represented by clean placeholders and service boundaries that can be replaced later.
 
