@@ -9,6 +9,7 @@ from app.admin import admin_login, router as admin_router
 from app.config import settings
 from app.database import Base, SessionLocal, check_database_connection, engine
 from app.routers.kiosk import router as kiosk_router
+from app.routers.kiosk_flow import router as kiosk_flow_router
 from app.schemas import AdminLoginRequest
 from app.seed import seed_sample_data
 
@@ -117,4 +118,5 @@ def admin_auth_login(payload: AdminLoginRequest):
 
 
 app.include_router(kiosk_router)
+app.include_router(kiosk_flow_router)
 app.include_router(admin_router)

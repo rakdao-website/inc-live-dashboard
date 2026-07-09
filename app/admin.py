@@ -18,8 +18,10 @@ from app.models import (
     LiveActivityMetric,
     LiveBooking,
     LiveEvent,
+    VisitSession,
     Sector,
     Visitor,
+    VisitorActivity,
     Zone,
 )
 from app.schemas import (
@@ -1171,6 +1173,125 @@ def delete_visitor(visitor_id: int, db: Session = Depends(get_db)):
     return success_response(
         message="Visitor deleted successfully",
         data={"visitor_id": visitor_id},
+    )
+
+
+# ============================================================
+# Visitor Activity Admin API
+# ============================================================
+
+
+def visitor_activity_payload(
+    activity: VisitorActivity,
+    visitor: Visitor | None,
+    visit_session: VisitSession | None,
+) -> dict[str, Any]:
+    return {
+        "visitor_activity_id": activity.visitor_activity_id,
+        "visitor_id": activity.visitor_id,
+        "visit_session_id": activity.visit_session_id,
+        "visitor_name": visitor.visitor_name if visitor else None,
+        "visitor_phone": visitor.visitor_phone if visitor else None,
+        "visitor_email": visitor.visitor_email if visitor else None,
+        "visitor_type": getattr(visitor, "visitor_type", "visitor") if visitor else None,
+        "company_name": getattr(visitor, "company_name", None) if visitor else None,
+        "company_number": getattr(visitor, "company_number", None) if visitor else None,
+        "last_visit_date": visit_session.check_in_time if visit_session else None,
+        "previous_selected_service": activity.previous_selected_service,
+        "current_visit_time": activity.created_at,
+        "current_selected_service": activity.selected_service,
+        "visit_purpose": activity.visit_purpose,
+        "notes": activity.notes,
+        "is_returning_visitor": visit_session.is_returning_visitor if visit_session else False,
+    }
+
+
+@router.get("/visitor-activity")
+def list_visitor_activity(
+    search: Optional[str] = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    activities = (
+        db.query(VisitorActivity)
+        .order_by(VisitorActivity.created_at.desc(), VisitorActivity.visitor_activity_id.desc())
+        .limit(limit)
+        .all()
+    )
+
+    rows = []
+    search_text = search.strip().lower() if search else None
+
+    for activity in activities:
+        visitor = db.get(Visitor, activity.visitor_id) if activity.visitor_id else None
+        visit_session = (
+            db.get(VisitSession, activity.visit_session_id)
+            if activity.visit_session_id
+            else None
+        )
+        row = visitor_activity_payload(activity, visitor, visit_session)
+
+        if search_text:
+            searchable = " ".join(
+                str(row.get(key) or "")
+                for key in (
+                    "visitor_name",
+                    "visitor_phone",
+                    "visitor_email",
+                    "company_name",
+                    "company_number",
+                    "current_selected_service",
+                    "previous_selected_service",
+                )
+            ).lower()
+            if search_text not in searchable:
+                continue
+
+        rows.append(row)
+
+    return success_response(
+        message="Visitor activity retrieved successfully",
+        data=rows,
+    )
+
+
+@router.get("/returning-visitors")
+def list_returning_visitors(
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    sessions = (
+        db.query(VisitSession)
+        .filter(VisitSession.is_returning_visitor.is_(True))
+        .order_by(VisitSession.check_in_time.desc(), VisitSession.visit_session_id.desc())
+        .limit(limit)
+        .all()
+    )
+
+    rows = []
+    for session in sessions:
+        visitor = db.get(Visitor, session.visitor_id) if session.visitor_id else None
+        rows.append(
+            {
+                "visit_session_id": session.visit_session_id,
+                "visitor_id": session.visitor_id,
+                "visitor_name": visitor.visitor_name if visitor else None,
+                "visitor_phone": visitor.visitor_phone if visitor else None,
+                "visitor_email": visitor.visitor_email if visitor else None,
+                "visitor_type": getattr(visitor, "visitor_type", "visitor") if visitor else None,
+                "company_name": getattr(visitor, "company_name", None) if visitor else None,
+                "company_number": getattr(visitor, "company_number", None) if visitor else None,
+                "check_in_time": session.check_in_time,
+                "previous_visit_id": session.previous_visit_id,
+                "current_selected_service": session.current_selected_service,
+                "visit_purpose": session.visit_purpose,
+                "notes": session.notes,
+            }
+        )
+
+    return success_response(
+        message="Returning visitors retrieved successfully",
+        data=rows,
     )
 
 

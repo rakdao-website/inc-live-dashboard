@@ -11,6 +11,7 @@ from sqlalchemy import (
     Integer,
     SmallInteger,
     String,
+    Text,
     Time,
     text,
 )
@@ -170,6 +171,13 @@ class Visitor(Base):
     visitor_phone: Mapped[str] = mapped_column(String(40), nullable=False, unique=True, index=True)
     visitor_email: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
     license_number: Mapped[Optional[str]] = mapped_column(String(80), nullable=True, unique=True, index=True)
+    visitor_type: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        server_default=text("'visitor'"),
+    )
+    company_name: Mapped[Optional[str]] = mapped_column(String(160), nullable=True)
+    company_number: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
     is_existing_client: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -197,6 +205,142 @@ class Visitor(Base):
 
     bookings: Mapped[list["Booking"]] = relationship(back_populates="visitor")
     check_ins: Mapped[list["VisitorCheckIn"]] = relationship(back_populates="visitor")
+
+
+class FaceProfile(Base):
+    __tablename__ = "face_profiles"
+
+    face_profile_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    visitor_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("visitors.visitor_id"),
+        nullable=False,
+        index=True,
+    )
+    face_identifier: Mapped[str] = mapped_column(String(160), nullable=False, unique=True)
+    consent_given: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("FALSE"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+
+
+class VisitSession(Base):
+    __tablename__ = "visit_sessions"
+
+    visit_session_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    visitor_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        ForeignKey("visitors.visitor_id"),
+        nullable=True,
+        index=True,
+    )
+    check_in_time: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+    recognition_method: Mapped[str] = mapped_column(String(20), nullable=False)
+    is_returning_visitor: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("FALSE"),
+    )
+    previous_visit_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        ForeignKey("visit_sessions.visit_session_id"),
+        nullable=True,
+    )
+    current_selected_service: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    visit_purpose: Mapped[Optional[str]] = mapped_column(String(160), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+
+
+class VisitorActivity(Base):
+    __tablename__ = "visitor_activity"
+
+    visitor_activity_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    visitor_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        ForeignKey("visitors.visitor_id"),
+        nullable=True,
+        index=True,
+    )
+    visit_session_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        ForeignKey("visit_sessions.visit_session_id"),
+        nullable=True,
+        index=True,
+    )
+    selected_service: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    visit_purpose: Mapped[Optional[str]] = mapped_column(String(160), nullable=True)
+    previous_selected_service: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+
+
+class Package(Base):
+    __tablename__ = "packages"
+
+    package_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    package_name: Mapped[str] = mapped_column(String(160), nullable=False, unique=True)
+    package_description: Mapped[str] = mapped_column(Text, nullable=False)
+    price_label: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    features: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("TRUE"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+
+
+class OtherAssistanceRequest(Base):
+    __tablename__ = "other_assistance_requests"
+
+    other_assistance_request_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    visitor_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        ForeignKey("visitors.visitor_id"),
+        nullable=True,
+        index=True,
+    )
+    visit_session_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        ForeignKey("visit_sessions.visit_session_id"),
+        nullable=True,
+    )
+    reason: Mapped[str] = mapped_column(String(120), nullable=False)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
 
 
 class VisitorCheckIn(Base):
