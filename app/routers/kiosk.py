@@ -140,6 +140,7 @@ def list_bookings(db: Session = Depends(get_db)) -> list[dict]:
             "name": booking.booking_name,
             "visitor_name": booking.visitor_name,
             "visitor_phone": booking.visitor_phone,
+            "visitor_email": booking.visitor_email,
             "visitor_is_client": booking.visitor_is_client,
             "date": booking.booking_date,
             "start": booking.booking_time_start,

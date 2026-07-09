@@ -66,6 +66,7 @@ class BookingRead(BaseModel):
     name: str
     visitor_name: str | None = None
     visitor_phone: str | None = None
+    visitor_email: str | None = None
     visitor_is_client: bool = False
     date: date
     start: time

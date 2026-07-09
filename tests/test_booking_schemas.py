@@ -11,6 +11,9 @@ def test_booking_create_defaults_booking_date_to_start_date():
         zone_id="MR_1",
         booking_type="meeting",
         booking_name="Visitor Meeting",
+        visitor_name="Maya Ahmed",
+        visitor_phone="+971501234567",
+        visitor_email="maya@example.com",
         booking_start_date=date(2026, 7, 1),
         booking_end_date=date(2026, 7, 1),
         booking_time_start=time(10, 0),
@@ -18,6 +21,9 @@ def test_booking_create_defaults_booking_date_to_start_date():
     )
 
     assert booking.booking_date == date(2026, 7, 1)
+    assert booking.visitor_name == "Maya Ahmed"
+    assert booking.visitor_phone == "+971501234567"
+    assert booking.visitor_email == "maya@example.com"
 
 
 def test_booking_create_rejects_end_date_before_start_date():

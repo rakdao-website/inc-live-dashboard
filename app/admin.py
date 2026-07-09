@@ -19,6 +19,7 @@ from app.models import (
     LiveBooking,
     LiveEvent,
     Sector,
+    Visitor,
     Zone,
 )
 from app.schemas import (
@@ -38,6 +39,9 @@ from app.schemas import (
     SectorCreate,
     SectorRead,
     SectorUpdate,
+    VisitorCreate,
+    VisitorRead,
+    VisitorUpdate,
     ZoneClosedResponse,
 )
 
@@ -128,6 +132,44 @@ def validate_bookable_open_zone(zone_id: str, db: Session) -> JSONResponse | Non
         )
 
     return None
+
+
+def upsert_visitor_from_booking(booking: Booking, db: Session) -> None:
+    if not booking.visitor_phone:
+        return
+
+    visitor = (
+        db.query(Visitor)
+        .filter(Visitor.visitor_phone == booking.visitor_phone)
+        .first()
+    )
+
+    if visitor is None:
+        visitor = Visitor(
+            visitor_name=booking.visitor_name or booking.booking_name,
+            visitor_phone=booking.visitor_phone,
+            visitor_email=booking.visitor_email,
+            is_existing_client=booking.visitor_is_client,
+            lead_source="admin_booking_tab",
+        )
+        db.add(visitor)
+        if hasattr(db, "flush"):
+            db.flush()
+        if getattr(visitor, "visitor_id", None) is not None:
+            booking.visitor_id = visitor.visitor_id
+        return
+
+    booking.visitor_id = visitor.visitor_id
+    if booking.visitor_name:
+        visitor.visitor_name = booking.visitor_name
+
+    if booking.visitor_email:
+        visitor.visitor_email = booking.visitor_email
+
+    visitor.is_existing_client = visitor.is_existing_client or booking.visitor_is_client
+    if not visitor.lead_source:
+        visitor.lead_source = "admin_booking_tab"
+    visitor.updated_at = db.query(func.current_timestamp()).scalar()
 
 
 def is_overlap_error(exc: SQLAlchemyError) -> bool:
@@ -749,11 +791,13 @@ def create_booking(payload: BookingCreate, db: Session = Depends(get_db)):
         return zone_error
 
     booking = Booking(
+        visitor_id=payload.visitor_id,
         zone_id=payload.zone_id,
         booking_type=payload.booking_type,
         booking_name=payload.booking_name,
         visitor_name=payload.visitor_name,
         visitor_phone=payload.visitor_phone,
+        visitor_email=payload.visitor_email,
         visitor_is_client=payload.visitor_is_client,
         booking_start_date=payload.booking_start_date,
         booking_end_date=payload.booking_end_date,
@@ -763,6 +807,7 @@ def create_booking(payload: BookingCreate, db: Session = Depends(get_db)):
     )
 
     db.add(booking)
+    upsert_visitor_from_booking(booking, db)
 
     try:
         db.commit()
@@ -830,6 +875,9 @@ def update_booking(
     if "zone_id" in update_data:
         booking.zone_id = update_data["zone_id"]
 
+    if "visitor_id" in update_data:
+        booking.visitor_id = update_data["visitor_id"]
+
     if "booking_type" in update_data:
         booking.booking_type = update_data["booking_type"]
 
@@ -841,6 +889,9 @@ def update_booking(
 
     if "visitor_phone" in update_data:
         booking.visitor_phone = update_data["visitor_phone"]
+
+    if "visitor_email" in update_data:
+        booking.visitor_email = update_data["visitor_email"]
 
     if "visitor_is_client" in update_data:
         booking.visitor_is_client = update_data["visitor_is_client"]
@@ -861,6 +912,8 @@ def update_booking(
 
     if "booking_time_end" in update_data:
         booking.booking_time_end = update_data["booking_time_end"]
+
+    upsert_visitor_from_booking(booking, db)
 
     try:
         db.commit()
@@ -883,6 +936,241 @@ def update_booking(
     return success_response(
         message="Booking updated successfully",
         data=data,
+    )
+
+
+# ============================================================
+# Visitors Management Admin API
+# ============================================================
+
+
+@router.get("/visitors")
+def list_visitors(
+    search: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    query = db.query(Visitor)
+
+    if search:
+        pattern = f"%{search}%"
+        query = query.filter(
+            (Visitor.visitor_name.ilike(pattern))
+            | (Visitor.visitor_phone.ilike(pattern))
+            | (Visitor.visitor_email.ilike(pattern))
+            | (Visitor.license_number.ilike(pattern))
+        )
+
+    visitors = query.order_by(Visitor.created_at.desc(), Visitor.visitor_id.desc()).all()
+    data = [VisitorRead.model_validate(visitor).model_dump() for visitor in visitors]
+
+    return success_response(
+        message="Visitors retrieved successfully",
+        data=data,
+    )
+
+
+@router.get("/visitors/check-in-match")
+def check_visitor_booking_match(
+    phone: str = Query(..., min_length=1),
+    db: Session = Depends(get_db),
+):
+    current_date = get_database_current_date(db)
+    visitor = db.query(Visitor).filter(Visitor.visitor_phone == phone).first()
+    bookings = (
+        db.query(LiveBooking)
+        .filter(
+            LiveBooking.visitor_phone == phone,
+            LiveBooking.booking_date == current_date,
+        )
+        .order_by(LiveBooking.booking_time_start)
+        .all()
+    )
+
+    return success_response(
+        message="Visitor booking match checked successfully",
+        data={
+            "phone": phone,
+            "visitor": VisitorRead.model_validate(visitor).model_dump() if visitor else None,
+            "has_booking_today": len(bookings) > 0,
+            "bookings_today": [
+                BookingRead.model_validate(booking).model_dump()
+                for booking in bookings
+            ],
+        },
+    )
+
+
+@router.get("/visitors/{visitor_id}")
+def get_visitor(visitor_id: int, db: Session = Depends(get_db)):
+    visitor = db.get(Visitor, visitor_id)
+
+    if visitor is None:
+        return not_found_response(
+            message="Visitor not found",
+            error_code="VISITOR_NOT_FOUND",
+        )
+
+    data = VisitorRead.model_validate(visitor).model_dump()
+
+    return success_response(
+        message="Visitor retrieved successfully",
+        data=data,
+    )
+
+
+@router.post("/visitors", status_code=status.HTTP_201_CREATED)
+def create_visitor(payload: VisitorCreate, db: Session = Depends(get_db)):
+    existing_visitor = (
+        db.query(Visitor)
+        .filter(Visitor.visitor_phone == payload.visitor_phone)
+        .first()
+    )
+
+    if existing_visitor is not None:
+        return conflict_response(
+            message="A visitor with this phone number already exists",
+            error_code="VISITOR_PHONE_EXISTS",
+        )
+
+    if payload.license_number:
+        existing_license = (
+            db.query(Visitor)
+            .filter(Visitor.license_number == payload.license_number)
+            .first()
+        )
+
+        if existing_license is not None:
+            return conflict_response(
+                message="A visitor with this license number already exists",
+                error_code="VISITOR_LICENSE_EXISTS",
+            )
+
+    visitor = Visitor(
+        visitor_name=payload.visitor_name,
+        visitor_phone=payload.visitor_phone,
+        visitor_email=payload.visitor_email,
+        license_number=payload.license_number,
+        is_existing_client=payload.is_existing_client,
+        face_reference_id=payload.face_reference_id,
+        face_consent_given=payload.face_consent_given,
+        face_consent_at=payload.face_consent_at,
+        lead_source=payload.lead_source,
+    )
+
+    db.add(visitor)
+    db.commit()
+    db.refresh(visitor)
+
+    data = VisitorRead.model_validate(visitor).model_dump()
+
+    return success_response(
+        message="Visitor created successfully",
+        data=data,
+    )
+
+
+@router.patch("/visitors/{visitor_id}")
+def update_visitor(
+    visitor_id: int,
+    payload: VisitorUpdate,
+    db: Session = Depends(get_db),
+):
+    visitor = db.get(Visitor, visitor_id)
+
+    if visitor is None:
+        return not_found_response(
+            message="Visitor not found",
+            error_code="VISITOR_NOT_FOUND",
+        )
+
+    update_data = payload.model_dump(exclude_unset=True)
+
+    if "visitor_phone" in update_data and update_data["visitor_phone"] != visitor.visitor_phone:
+        existing_visitor = (
+            db.query(Visitor)
+            .filter(Visitor.visitor_phone == update_data["visitor_phone"])
+            .first()
+        )
+
+        if existing_visitor is not None:
+            return conflict_response(
+                message="A visitor with this phone number already exists",
+                error_code="VISITOR_PHONE_EXISTS",
+            )
+
+    if (
+        "license_number" in update_data
+        and update_data["license_number"]
+        and update_data["license_number"] != visitor.license_number
+    ):
+        existing_license = (
+            db.query(Visitor)
+            .filter(Visitor.license_number == update_data["license_number"])
+            .first()
+        )
+
+        if existing_license is not None:
+            return conflict_response(
+                message="A visitor with this license number already exists",
+                error_code="VISITOR_LICENSE_EXISTS",
+            )
+
+    if "visitor_name" in update_data:
+        visitor.visitor_name = update_data["visitor_name"]
+
+    if "visitor_phone" in update_data:
+        visitor.visitor_phone = update_data["visitor_phone"]
+
+    if "visitor_email" in update_data:
+        visitor.visitor_email = update_data["visitor_email"]
+
+    if "license_number" in update_data:
+        visitor.license_number = update_data["license_number"]
+
+    if "is_existing_client" in update_data:
+        visitor.is_existing_client = update_data["is_existing_client"]
+
+    if "face_reference_id" in update_data:
+        visitor.face_reference_id = update_data["face_reference_id"]
+
+    if "face_consent_given" in update_data:
+        visitor.face_consent_given = update_data["face_consent_given"]
+
+    if "face_consent_at" in update_data:
+        visitor.face_consent_at = update_data["face_consent_at"]
+
+    if "lead_source" in update_data:
+        visitor.lead_source = update_data["lead_source"]
+
+    visitor.updated_at = db.query(func.current_timestamp()).scalar()
+
+    db.commit()
+    db.refresh(visitor)
+
+    data = VisitorRead.model_validate(visitor).model_dump()
+
+    return success_response(
+        message="Visitor updated successfully",
+        data=data,
+    )
+
+
+@router.delete("/visitors/{visitor_id}")
+def delete_visitor(visitor_id: int, db: Session = Depends(get_db)):
+    visitor = db.get(Visitor, visitor_id)
+
+    if visitor is None:
+        return not_found_response(
+            message="Visitor not found",
+            error_code="VISITOR_NOT_FOUND",
+        )
+
+    db.delete(visitor)
+    db.commit()
+
+    return success_response(
+        message="Visitor deleted successfully",
+        data={"visitor_id": visitor_id},
     )
 
 

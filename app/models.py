@@ -130,6 +130,12 @@ class Booking(Base):
     )
 
     booking_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    visitor_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        ForeignKey("visitors.visitor_id"),
+        nullable=True,
+        index=True,
+    )
     zone_id: Mapped[str] = mapped_column(
         String(30),
         ForeignKey("zones.zone_id"),
@@ -140,6 +146,7 @@ class Booking(Base):
     booking_name: Mapped[str] = mapped_column(String(200), nullable=False)
     visitor_name: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
     visitor_phone: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    visitor_email: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
     visitor_is_client: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -152,6 +159,100 @@ class Booking(Base):
     booking_time_end: Mapped[time] = mapped_column(Time, nullable=False)
 
     zone: Mapped[Zone] = relationship(back_populates="bookings")
+    visitor: Mapped[Optional["Visitor"]] = relationship(back_populates="bookings")
+
+
+class Visitor(Base):
+    __tablename__ = "visitors"
+
+    visitor_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    visitor_name: Mapped[str] = mapped_column(String(150), nullable=False)
+    visitor_phone: Mapped[str] = mapped_column(String(40), nullable=False, unique=True, index=True)
+    visitor_email: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    license_number: Mapped[Optional[str]] = mapped_column(String(80), nullable=True, unique=True, index=True)
+    is_existing_client: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("FALSE"),
+    )
+    face_reference_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    face_consent_given: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("FALSE"),
+    )
+    face_consent_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    lead_source: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    last_visit_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+
+    bookings: Mapped[list["Booking"]] = relationship(back_populates="visitor")
+    check_ins: Mapped[list["VisitorCheckIn"]] = relationship(back_populates="visitor")
+
+
+class VisitorCheckIn(Base):
+    __tablename__ = "visitor_check_ins"
+    __table_args__ = (
+        CheckConstraint(
+            "check_in_status IN ("
+            "'booking_found', 'no_booking_found', 'new_visitor_registered', "
+            "'service_requested', 'event_selected'"
+            ")"
+        ),
+        CheckConstraint("match_method IN ('phone', 'license_number', 'face')"),
+        CheckConstraint(
+            "selected_service IS NULL OR selected_service IN ("
+            "'meeting_room', 'podcast_studio', 'tiktok_studio', "
+            "'event', 'business_center', 'other'"
+            ")"
+        ),
+        CheckConstraint(
+            "face_enrollment_status IS NULL OR face_enrollment_status IN ("
+            "'not_enrolled', 'enrolled', 'failed'"
+            ")"
+        ),
+    )
+
+    check_in_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    visitor_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        ForeignKey("visitors.visitor_id"),
+        nullable=True,
+        index=True,
+    )
+    visitor_phone: Mapped[Optional[str]] = mapped_column(String(40), nullable=True, index=True)
+    booking_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        ForeignKey("bookings.booking_id"),
+        nullable=True,
+        index=True,
+    )
+    event_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        ForeignKey("events.event_id"),
+        nullable=True,
+        index=True,
+    )
+    check_in_time: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+    check_in_status: Mapped[str] = mapped_column(String(40), nullable=False)
+    match_method: Mapped[str] = mapped_column(String(30), nullable=False)
+    selected_service: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    face_enrollment_status: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+
+    visitor: Mapped[Optional[Visitor]] = relationship(back_populates="check_ins")
 
 
 class ActivityFeed(Base):
@@ -239,6 +340,7 @@ class LiveBooking(Base):
     booking_end_date: Mapped[date] = mapped_column(Date)
     visitor_name: Mapped[Optional[str]] = mapped_column(String(150))
     visitor_phone: Mapped[Optional[str]] = mapped_column(String(40))
+    visitor_email: Mapped[Optional[str]] = mapped_column(String(150))
     visitor_is_client: Mapped[bool] = mapped_column(Boolean)
     booking_date: Mapped[date] = mapped_column(Date)
     booking_time_start: Mapped[time] = mapped_column(Time)

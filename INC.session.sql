@@ -13,7 +13,9 @@ DROP VIEW IF EXISTS live_events;
 DROP VIEW IF EXISTS live_bookings;
 DROP FUNCTION IF EXISTS prevent_schedule_overlap() CASCADE;
 DROP TABLE IF EXISTS activity_feed;
+DROP TABLE IF EXISTS visitor_check_ins;
 DROP TABLE IF EXISTS bookings;
+DROP TABLE IF EXISTS visitors;
 DROP TABLE IF EXISTS events;
 DROP TABLE IF EXISTS sector_metrics;
 DROP TABLE IF EXISTS sectors;
@@ -67,19 +69,88 @@ CREATE TABLE events (
   CHECK (event_time_end > event_time_start)
 );
 
+-- Visitor leads and check-in identities.
+-- visitor_phone is the practical link used to match visitors to bookings.
+CREATE TABLE visitors (
+  visitor_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  visitor_name VARCHAR(150) NOT NULL,
+  visitor_phone VARCHAR(40) NOT NULL UNIQUE,
+  visitor_email VARCHAR(150),
+  license_number VARCHAR(80) UNIQUE,
+  is_existing_client BOOLEAN NOT NULL DEFAULT FALSE,
+  face_reference_id VARCHAR(120),
+  face_consent_given BOOLEAN NOT NULL DEFAULT FALSE,
+  face_consent_at TIMESTAMP,
+  lead_source VARCHAR(40) CHECK (
+    lead_source IS NULL OR lead_source IN (
+      'admin_visitors_tab',
+      'admin_booking_tab',
+      'screen_1_booking',
+      'screen_2_booking',
+      'screen_2_check_in'
+    )
+  ),
+  last_visit_at TIMESTAMP,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Meeting and studio reservations. Each booking must be assigned to a map zone.
 CREATE TABLE bookings (
   booking_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  visitor_id BIGINT REFERENCES visitors(visitor_id),
   zone_id VARCHAR(30) NOT NULL REFERENCES zones(zone_id),
   booking_type VARCHAR(10) NOT NULL CHECK (booking_type IN ('meeting', 'studio', 'office')),
   booking_name VARCHAR(200) NOT NULL,
   visitor_name VARCHAR(150),
   visitor_phone VARCHAR(40),
+  visitor_email VARCHAR(150),
   visitor_is_client BOOLEAN NOT NULL DEFAULT FALSE,
+  booking_start_date DATE NOT NULL,
+  booking_end_date DATE NOT NULL,
   booking_date DATE NOT NULL,
   booking_time_start TIME NOT NULL,
   booking_time_end TIME NOT NULL,
+  CHECK (booking_end_date >= booking_start_date),
   CHECK (booking_time_end > booking_time_start)
+);
+
+-- Kiosk check-in history.
+-- face_enrollment_status belongs here because it describes what happened during this check-in.
+CREATE TABLE visitor_check_ins (
+  check_in_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  visitor_id BIGINT REFERENCES visitors(visitor_id),
+  visitor_phone VARCHAR(40),
+  booking_id BIGINT REFERENCES bookings(booking_id),
+  event_id BIGINT REFERENCES events(event_id),
+  check_in_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  check_in_status VARCHAR(40) NOT NULL CHECK (
+    check_in_status IN (
+      'booking_found',
+      'no_booking_found',
+      'new_visitor_registered',
+      'service_requested',
+      'event_selected'
+    )
+  ),
+  match_method VARCHAR(30) NOT NULL CHECK (match_method IN ('phone', 'license_number', 'face')),
+  selected_service VARCHAR(40) CHECK (
+    selected_service IS NULL OR selected_service IN (
+      'meeting_room',
+      'podcast_studio',
+      'tiktok_studio',
+      'event',
+      'business_center',
+      'other'
+    )
+  ),
+  face_enrollment_status VARCHAR(30) CHECK (
+    face_enrollment_status IS NULL OR face_enrollment_status IN (
+      'not_enrolled',
+      'enrolled',
+      'failed'
+    )
+  )
 );
 
 -- Live Activity Feed.
@@ -253,13 +324,15 @@ FROM events e;
 -- Booking status is calculated automatically from today's date and time.
 CREATE VIEW live_bookings AS
 SELECT
-  b.booking_id, b.zone_id, b.booking_type, b.booking_name, b.booking_date,
-  b.visitor_name, b.visitor_phone, b.visitor_is_client,
+  b.booking_id, b.zone_id, b.booking_type, b.booking_name,
+  b.booking_start_date, b.booking_end_date, b.booking_date,
+  b.visitor_name, b.visitor_phone, b.visitor_email, b.visitor_is_client,
   b.booking_time_start, b.booking_time_end,
   CASE
-    WHEN b.booking_date < CURRENT_DATE
-      OR (b.booking_date = CURRENT_DATE AND b.booking_time_end <= LOCALTIME) THEN 'ended'
-    WHEN b.booking_date = CURRENT_DATE
+    WHEN b.booking_end_date < CURRENT_DATE
+      OR (b.booking_end_date = CURRENT_DATE AND b.booking_time_end <= LOCALTIME) THEN 'ended'
+    WHEN b.booking_start_date <= CURRENT_DATE
+      AND b.booking_end_date >= CURRENT_DATE
       AND b.booking_time_start <= LOCALTIME
       AND b.booking_time_end > LOCALTIME THEN 'live'
     ELSE 'upcoming'
@@ -407,21 +480,35 @@ VALUES
   ('EVT_1', 'Web3 Community Hour', CURRENT_DATE, '15:00', '16:00', 'Event Area', 'upcoming', 'Innovation City', NULL);
 
 INSERT INTO bookings
-  (zone_id, booking_type, booking_name, visitor_name, visitor_phone, visitor_is_client, booking_date, booking_time_start, booking_time_end)
+  (zone_id, booking_type, booking_name, visitor_name, visitor_phone, visitor_email, visitor_is_client, booking_start_date, booking_end_date, booking_date, booking_time_start, booking_time_end)
 VALUES
-  ('MR_1', 'meeting', 'Investor Strategy Meeting', 'Aisha Khan', '+971501234567', TRUE, CURRENT_DATE, '11:00', '12:00'),
-  ('POD_1', 'studio', 'Founder Stories Podcast', 'Omar Hassan', '+971551112233', FALSE, CURRENT_DATE, '10:30', '12:30');
+  ('MR_1', 'meeting', 'Investor Strategy Meeting', 'Aisha Khan', '+971501234567', 'aisha.khan@example.com', TRUE, CURRENT_DATE, CURRENT_DATE, CURRENT_DATE, '11:00', '12:00'),
+  ('POD_1', 'studio', 'Founder Stories Podcast', 'Omar Hassan', '+971551112233', 'omar.hassan@example.com', FALSE, CURRENT_DATE, CURRENT_DATE, CURRENT_DATE, '10:30', '12:30');
+
+INSERT INTO visitors
+  (visitor_name, visitor_phone, visitor_email, is_existing_client)
+VALUES
+  ('Aisha Khan', '+971501234567', 'aisha.khan@example.com', TRUE),
+  ('Omar Hassan', '+971551112233', 'omar.hassan@example.com', FALSE);
+
+UPDATE bookings AS b
+SET visitor_id = v.visitor_id
+FROM visitors AS v
+WHERE b.visitor_phone = v.visitor_phone;
 
 -- Current office occupancy: all 19 bookable offices are booked today.
 INSERT INTO bookings
-  (zone_id, booking_type, booking_name, visitor_name, visitor_phone, visitor_is_client, booking_date, booking_time_start, booking_time_end)
+  (zone_id, booking_type, booking_name, visitor_name, visitor_phone, visitor_email, visitor_is_client, booking_start_date, booking_end_date, booking_date, booking_time_start, booking_time_end)
 SELECT
   'OFF_' || LPAD(office_number::TEXT, 2, '0'),
   'office',
   'Office ' || office_number || ' Booking',
   NULL,
   NULL,
+  NULL,
   TRUE,
+  CURRENT_DATE,
+  CURRENT_DATE,
   CURRENT_DATE,
   '00:00'::TIME,
   '23:59'::TIME
