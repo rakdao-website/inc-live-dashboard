@@ -8,10 +8,10 @@ underlying model.
 Expected folder structure:
 
     dataset/
-      john_smith/
+      Dima/
         photo1.jpg
         photo2.jpg
-      jane_doe/
+      Noor/
         photo1.jpg
         photo2.jpg
 
