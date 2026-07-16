@@ -80,24 +80,31 @@ CREATE INDEX IF NOT EXISTS ix_other_assistance_requests_visitor_id ON other_assi
 INSERT INTO packages (package_name, package_description, price_label, features, is_active)
 VALUES
   (
-    'Business Setup Starter',
-    'A starter option for founders exploring Innovation City services.',
-    'Contact CX',
-    'Company setup guidance;Free zone consultation;Document support',
+    'Idea',
+    'Idea plan includes',
+    'AED 6,600',
+    '0 visa;Multiple shareholders allowed;10 standard or custom activities included;Shared desk included;Unlimited refreshments in Innovation HQ;Access to Innovation HQ event space and content creator studio',
     TRUE
   ),
   (
-    'Growth Package',
-    'A package for teams ready to expand their Innovation City presence.',
-    'Contact CX',
-    'License guidance;Workspace options;CX follow-up',
+    'Seed',
+    'Seed plan includes',
+    'AED 13,200',
+    '1 visa included (capped at 1);1 shareholder;1 custom or premium activity allowed (over 200 technology and innovation-related options);Shared desk included;Unlimited refreshments in Innovation HQ;Access to Innovation HQ event space and content creator studio',
     TRUE
   ),
   (
-    'Premium Client Support',
-    'A premium support path for clients needing tailored assistance.',
-    'Contact CX',
-    'Priority CX support;Business center guidance;Renewal support',
+    'Startup',
+    'Startup plan includes',
+    'AED 15,400',
+    '1 visa included (capped at 4);Multiple shareholders allowed;10 standard or custom activities included;Shared desk included;Unlimited refreshments in Innovation HQ;Unlimited access to Innovation HQ event space and content creator studio',
+    TRUE
+  ),
+  (
+    'Growth',
+    'Growth plan includes',
+    'AED 22,550',
+    '1 visa included (capped at 4);Multiple shareholders allowed;10 standard or custom activities included;Dedicated desk included;Unlimited refreshments in Innovation HQ;Unlimited access to Innovation HQ event space and content creator studio',
     TRUE
   )
 ON CONFLICT (package_name) DO NOTHING;

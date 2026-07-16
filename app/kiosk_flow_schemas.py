@@ -23,16 +23,24 @@ OtherAssistanceReason = Literal[
 
 class RecognizeFaceRequest(BaseModel):
     simulate_mobile_number: Optional[str] = Field(default=None, max_length=40)
+    image_base64: Optional[str] = None
+    images_base64: Optional[list[str]] = Field(default=None, min_length=1, max_length=5)
 
 
 class RecognizeFaceResponse(BaseModel):
     recognized: bool
     visitor_id: Optional[int] = None
+    matched_name: Optional[str] = None
+    confidence: Optional[float] = None
 
 
 class ProfileLookupRequest(BaseModel):
     full_name: str = Field(..., min_length=1, max_length=150)
     mobile_number: str = Field(..., min_length=1, max_length=40)
+
+
+class LicenseLookupRequest(BaseModel):
+    license_number: str = Field(..., min_length=1, max_length=80)
 
 
 class CreateProfileRequest(BaseModel):
@@ -45,9 +53,8 @@ class CreateProfileRequest(BaseModel):
     company_number: Optional[str] = Field(default=None, max_length=80)
 
     @model_validator(mode="after")
-    def clear_license_for_non_clients(self):
-        if self.visitor_type == "visitor":
-            self.license_number = None
+    def clear_license_number(self):
+        self.license_number = None
         return self
 
 
@@ -58,6 +65,7 @@ class FacialConsentRequest(BaseModel):
 
 class CreateFaceProfileRequest(BaseModel):
     visitor_id: int
+    images_base64: list[str] = Field(..., min_length=1, max_length=5)
 
 
 class VisitSessionCreate(BaseModel):
@@ -72,6 +80,7 @@ class KioskBookingCreate(BaseModel):
     visitor_id: int
     visit_session_id: Optional[int] = None
     service_type: Literal["meeting_room", "podcast_studio", "tiktok_studio"]
+    zone_id: Optional[str] = Field(default=None, max_length=30)
     room_name: Optional[str] = Field(default=None, max_length=120)
     booking_date: date
     booking_time_start: time
@@ -125,16 +134,6 @@ class KioskEventRead(BaseModel):
     event_time_end: time
     event_location: str
     short_description: str
-
-
-class KioskPackageRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    package_id: int
-    package_name: str
-    package_description: str
-    price_label: Optional[str] = None
-    features: str
 
 
 class VisitSessionRead(BaseModel):

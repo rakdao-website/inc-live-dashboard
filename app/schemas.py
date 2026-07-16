@@ -3,6 +3,8 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.operating_hours import OPERATING_HOURS_MESSAGE, is_within_operating_hours
+
 
 # ============================================================
 # Shared response schemas
@@ -116,6 +118,8 @@ class BookingCreate(BaseModel):
             raise ValueError("booking_end_date must be on or after booking_start_date")
         if self.booking_time_end <= self.booking_time_start:
             raise ValueError("booking_time_end must be after booking_time_start")
+        if not is_within_operating_hours(self.booking_time_start, self.booking_time_end):
+            raise ValueError(OPERATING_HOURS_MESSAGE)
         if self.booking_date is None:
             self.booking_date = self.booking_start_date
         return self
@@ -150,6 +154,12 @@ class BookingUpdate(BaseModel):
             and self.booking_time_end <= self.booking_time_start
         ):
             raise ValueError("booking_time_end must be after booking_time_start")
+        if (
+            self.booking_time_start is not None
+            and self.booking_time_end is not None
+            and not is_within_operating_hours(self.booking_time_start, self.booking_time_end)
+        ):
+            raise ValueError(OPERATING_HOURS_MESSAGE)
         return self
 
 
@@ -177,9 +187,11 @@ class VisitorRead(BaseModel):
             "screen_1_booking",
             "screen_2_booking",
             "screen_2_check_in",
+            "map_screen",
         ]
     ] = None
     last_visit_at: Optional[datetime] = None
+    visit_count: int = 0
     created_at: datetime
     updated_at: datetime
 
@@ -200,6 +212,7 @@ class VisitorCreate(BaseModel):
             "screen_1_booking",
             "screen_2_booking",
             "screen_2_check_in",
+            "map_screen",
         ]
     ] = "admin_visitors_tab"
 
@@ -220,6 +233,7 @@ class VisitorUpdate(BaseModel):
             "screen_1_booking",
             "screen_2_booking",
             "screen_2_check_in",
+            "map_screen",
         ]
     ] = None
 
@@ -308,6 +322,8 @@ class EventCreate(BaseModel):
     def validate_time_range(self):
         if self.event_time_end <= self.event_time_start:
             raise ValueError("event_time_end must be after event_time_start")
+        if not is_within_operating_hours(self.event_time_start, self.event_time_end):
+            raise ValueError(OPERATING_HOURS_MESSAGE)
         if self.event_location is None or not self.event_location.strip():
             self.event_location = DEFAULT_EVENT_LOCATION
         return self
@@ -331,6 +347,12 @@ class EventUpdate(BaseModel):
             and self.event_time_end <= self.event_time_start
         ):
             raise ValueError("event_time_end must be after event_time_start")
+        if (
+            self.event_time_start is not None
+            and self.event_time_end is not None
+            and not is_within_operating_hours(self.event_time_start, self.event_time_end)
+        ):
+            raise ValueError(OPERATING_HOURS_MESSAGE)
         return self
 
 
@@ -346,44 +368,13 @@ class EcosystemMetricRead(BaseModel):
     snapshot_date: date
     active_companies: int
     active_licenses: int
-    top_sector: str
     recorded_at: datetime
 
 
 class EcosystemMetricUpdate(BaseModel):
     active_companies: int = Field(..., ge=0)
     active_licenses: int = Field(..., ge=0)
-    top_sector: str = Field(..., min_length=1, max_length=100)
     snapshot_date: Optional[date] = None
-
-
-# ============================================================
-# Sector schemas
-# ============================================================
-
-
-class SectorRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    sector_id: int
-    sector_name: str
-    company_count: int
-    source_name: str
-    display_order: int
-
-
-class SectorCreate(BaseModel):
-    sector_name: str = Field(..., min_length=1, max_length=100)
-    company_count: int = Field(..., ge=0)
-    source_name: str = Field(..., min_length=1, max_length=200)
-    display_order: int = Field(..., gt=0)
-
-
-class SectorUpdate(BaseModel):
-    sector_name: Optional[str] = Field(default=None, min_length=1, max_length=100)
-    company_count: Optional[int] = Field(default=None, ge=0)
-    source_name: Optional[str] = Field(default=None, min_length=1, max_length=200)
-    display_order: Optional[int] = Field(default=None, gt=0)
 
 
 # ============================================================

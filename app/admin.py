@@ -1,4 +1,4 @@
-from datetime import date as DateType
+from datetime import date as DateType, datetime
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Query, status
@@ -9,21 +9,25 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
+from app.kiosk_flow_services import schedule_has_conflict
 from app.models import (
     AdminZone,
     Booking,
     EcosystemMetric,
     Event,
+    FaceProfile,
     LiveActivityFeed,
     LiveActivityMetric,
     LiveBooking,
     LiveEvent,
+    OtherAssistanceRequest,
     VisitSession,
-    Sector,
     Visitor,
     VisitorActivity,
+    VisitorCheckIn,
     Zone,
 )
+from app.operating_hours import OPERATING_HOURS_MESSAGE, is_within_operating_hours
 from app.schemas import (
     AdminLoginRequest,
     AdminLoginResponse,
@@ -38,14 +42,12 @@ from app.schemas import (
     EventUpdate,
     LiveActivityFeedRead,
     LiveActivityMetricRead,
-    SectorCreate,
-    SectorRead,
-    SectorUpdate,
     VisitorCreate,
     VisitorRead,
     VisitorUpdate,
     ZoneClosedResponse,
 )
+from app.services import booking_status, now_dubai
 
 
 router = APIRouter(
@@ -366,13 +368,11 @@ def update_current_ecosystem_metrics(
             snapshot_date=target_date,
             active_companies=payload.active_companies,
             active_licenses=payload.active_licenses,
-            top_sector=payload.top_sector,
         )
         db.add(metrics)
     else:
         metrics.active_companies = payload.active_companies
         metrics.active_licenses = payload.active_licenses
-        metrics.top_sector = payload.top_sector
         metrics.recorded_at = func.current_timestamp()
 
     db.commit()
@@ -382,162 +382,6 @@ def update_current_ecosystem_metrics(
 
     return success_response(
         message="Ecosystem metrics updated successfully",
-        data=data,
-    )
-
-
-# ============================================================
-# Sector Management Admin API
-# ============================================================
-
-
-@router.get("/sectors")
-def list_sectors(db: Session = Depends(get_db)):
-    sectors = (
-        db.query(Sector)
-        .order_by(Sector.display_order)
-        .all()
-    )
-
-    data = [
-        SectorRead.model_validate(sector).model_dump()
-        for sector in sectors
-    ]
-
-    return success_response(
-        message="Sectors retrieved successfully",
-        data=data,
-    )
-
-
-@router.get("/sectors/{sector_id}")
-def get_sector(sector_id: int, db: Session = Depends(get_db)):
-    sector = db.get(Sector, sector_id)
-
-    if sector is None:
-        return not_found_response(
-            message="Sector not found",
-            error_code="SECTOR_NOT_FOUND",
-        )
-
-    data = SectorRead.model_validate(sector).model_dump()
-
-    return success_response(
-        message="Sector retrieved successfully",
-        data=data,
-    )
-
-
-@router.post("/sectors", status_code=status.HTTP_201_CREATED)
-def create_sector(payload: SectorCreate, db: Session = Depends(get_db)):
-    existing_name = (
-        db.query(Sector)
-        .filter(Sector.sector_name == payload.sector_name)
-        .first()
-    )
-
-    if existing_name is not None:
-        return conflict_response(
-            message="Sector name already exists",
-            error_code="SECTOR_NAME_EXISTS",
-        )
-
-    existing_order = (
-        db.query(Sector)
-        .filter(Sector.display_order == payload.display_order)
-        .first()
-    )
-
-    if existing_order is not None:
-        return conflict_response(
-            message="Display order already exists",
-            error_code="DISPLAY_ORDER_EXISTS",
-        )
-
-    sector = Sector(
-        sector_name=payload.sector_name,
-        company_count=payload.company_count,
-        source_name=payload.source_name,
-        display_order=payload.display_order,
-    )
-
-    db.add(sector)
-    db.commit()
-    db.refresh(sector)
-
-    data = SectorRead.model_validate(sector).model_dump()
-
-    return success_response(
-        message="Sector created successfully",
-        data=data,
-    )
-
-
-@router.patch("/sectors/{sector_id}")
-def update_sector(
-    sector_id: int,
-    payload: SectorUpdate,
-    db: Session = Depends(get_db),
-):
-    sector = db.get(Sector, sector_id)
-
-    if sector is None:
-        return not_found_response(
-            message="Sector not found",
-            error_code="SECTOR_NOT_FOUND",
-        )
-
-    update_data = payload.model_dump(exclude_unset=True)
-
-    if "sector_name" in update_data:
-        existing_name = (
-            db.query(Sector)
-            .filter(
-                Sector.sector_name == update_data["sector_name"],
-                Sector.sector_id != sector_id,
-            )
-            .first()
-        )
-
-        if existing_name is not None:
-            return conflict_response(
-                message="Sector name already exists",
-                error_code="SECTOR_NAME_EXISTS",
-            )
-
-        sector.sector_name = update_data["sector_name"]
-
-    if "company_count" in update_data:
-        sector.company_count = update_data["company_count"]
-
-    if "source_name" in update_data:
-        sector.source_name = update_data["source_name"]
-
-    if "display_order" in update_data:
-        existing_order = (
-            db.query(Sector)
-            .filter(
-                Sector.display_order == update_data["display_order"],
-                Sector.sector_id != sector_id,
-            )
-            .first()
-        )
-
-        if existing_order is not None:
-            return conflict_response(
-                message="Display order already exists",
-                error_code="DISPLAY_ORDER_EXISTS",
-            )
-
-        sector.display_order = update_data["display_order"]
-
-    db.commit()
-    db.refresh(sector)
-
-    data = SectorRead.model_validate(sector).model_dump()
-
-    return success_response(
-        message="Sector updated successfully",
         data=data,
     )
 
@@ -607,6 +451,18 @@ def create_event(payload: EventCreate, db: Session = Depends(get_db)):
     if zone_error is not None:
         return zone_error
 
+    if schedule_has_conflict(
+        db,
+        zone_id=payload.zone_id,
+        schedule_date=payload.event_date,
+        start_time=payload.event_time_start,
+        end_time=payload.event_time_end,
+    ):
+        return conflict_response(
+            message="This event overlaps another event or booking in the selected zone",
+            error_code="EVENT_OVERLAP",
+        )
+
     event = Event(
         zone_id=payload.zone_id,
         event_name=payload.event_name,
@@ -675,6 +531,26 @@ def update_event(
             error_code="INVALID_TIME_RANGE",
         )
 
+    if not is_within_operating_hours(target_start, target_end):
+        return bad_request_response(
+            message=OPERATING_HOURS_MESSAGE,
+            error_code="OUTSIDE_OPERATING_HOURS",
+        )
+
+    target_event_date = update_data.get("event_date", event.event_date)
+    if schedule_has_conflict(
+        db,
+        zone_id=target_zone_id,
+        schedule_date=target_event_date,
+        start_time=target_start,
+        end_time=target_end,
+        exclude_event_id=event.event_id,
+    ):
+        return conflict_response(
+            message="This event overlaps another event or booking in the selected zone",
+            error_code="EVENT_OVERLAP",
+        )
+
     if "zone_id" in update_data:
         event.zone_id = update_data["zone_id"]
 
@@ -728,6 +604,12 @@ def update_event(
 # ============================================================
 
 
+def admin_booking_payload(booking: LiveBooking, now: datetime | None = None) -> dict[str, Any]:
+    data = BookingRead.model_validate(booking).model_dump()
+    data["booking_status"] = booking_status(booking, now or now_dubai())
+    return data
+
+
 @router.get("/bookings")
 def list_bookings(
     booking_date: Optional[DateType] = Query(default=None),
@@ -747,9 +629,6 @@ def list_bookings(
     if booking_type is not None:
         query = query.filter(LiveBooking.booking_type == booking_type)
 
-    if status_filter is not None:
-        query = query.filter(LiveBooking.booking_status == status_filter)
-
     bookings = (
         query
         .order_by(LiveBooking.booking_date, LiveBooking.booking_time_start)
@@ -757,9 +636,15 @@ def list_bookings(
     )
 
     data = [
-        BookingRead.model_validate(booking).model_dump()
+        admin_booking_payload(booking)
         for booking in bookings
     ]
+    if status_filter is not None:
+        data = [
+            booking
+            for booking in data
+            if booking["booking_status"] == status_filter
+        ]
 
     return success_response(
         message="Bookings retrieved successfully",
@@ -777,7 +662,7 @@ def get_booking(booking_id: int, db: Session = Depends(get_db)):
             error_code="BOOKING_NOT_FOUND",
         )
 
-    data = BookingRead.model_validate(booking).model_dump()
+    data = admin_booking_payload(booking)
 
     return success_response(
         message="Booking retrieved successfully",
@@ -791,6 +676,18 @@ def create_booking(payload: BookingCreate, db: Session = Depends(get_db)):
 
     if zone_error is not None:
         return zone_error
+
+    if schedule_has_conflict(
+        db,
+        zone_id=payload.zone_id,
+        schedule_date=payload.booking_date or payload.booking_start_date,
+        start_time=payload.booking_time_start,
+        end_time=payload.booking_time_end,
+    ):
+        return conflict_response(
+            message="This booking overlaps another booking or event in the selected zone",
+            error_code="BOOKING_OVERLAP",
+        )
 
     booking = Booking(
         visitor_id=payload.visitor_id,
@@ -827,7 +724,7 @@ def create_booking(payload: BookingCreate, db: Session = Depends(get_db)):
     db.refresh(booking)
 
     live_booking = db.get(LiveBooking, booking.booking_id)
-    data = BookingRead.model_validate(live_booking).model_dump()
+    data = admin_booking_payload(live_booking)
 
     return success_response(
         message="Booking created successfully",
@@ -872,6 +769,29 @@ def update_booking(
         return bad_request_response(
             message="booking_time_end must be after booking_time_start",
             error_code="INVALID_TIME_RANGE",
+        )
+
+    if not is_within_operating_hours(target_start, target_end):
+        return bad_request_response(
+            message=OPERATING_HOURS_MESSAGE,
+            error_code="OUTSIDE_OPERATING_HOURS",
+        )
+
+    target_booking_date = update_data.get(
+        "booking_date",
+        update_data.get("booking_start_date", booking.booking_date),
+    )
+    if schedule_has_conflict(
+        db,
+        zone_id=target_zone_id,
+        schedule_date=target_booking_date,
+        start_time=target_start,
+        end_time=target_end,
+        exclude_booking_id=booking.booking_id,
+    ):
+        return conflict_response(
+            message="This booking overlaps another booking or event in the selected zone",
+            error_code="BOOKING_OVERLAP",
         )
 
     if "zone_id" in update_data:
@@ -933,7 +853,7 @@ def update_booking(
     db.refresh(booking)
 
     live_booking = db.get(LiveBooking, booking.booking_id)
-    data = BookingRead.model_validate(live_booking).model_dump()
+    data = admin_booking_payload(live_booking)
 
     return success_response(
         message="Booking updated successfully",
@@ -944,6 +864,71 @@ def update_booking(
 # ============================================================
 # Visitors Management Admin API
 # ============================================================
+
+
+def normalise_visit_date(value: Any) -> DateType | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, DateType):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value).date()
+        except ValueError:
+            try:
+                return DateType.fromisoformat(value[:10])
+            except ValueError:
+                return None
+    return None
+
+
+def collect_visit_dates(rows: list[Any]) -> set[DateType]:
+    dates: set[DateType] = set()
+    for row in rows:
+        try:
+            raw_value = row[0]
+        except (TypeError, KeyError, IndexError):
+            raw_value = row
+        visit_date = normalise_visit_date(raw_value)
+        if visit_date is not None:
+            dates.add(visit_date)
+    return dates
+
+
+def visitor_visit_count(db: Session, visitor_id: int) -> int:
+    visit_dates: set[DateType] = set()
+
+    visit_dates.update(
+        collect_visit_dates(
+            db.query(func.date(VisitSession.check_in_time))
+            .filter(VisitSession.visitor_id == visitor_id)
+            .all()
+        )
+    )
+    visit_dates.update(
+        collect_visit_dates(
+            db.query(func.date(VisitorCheckIn.check_in_time))
+            .filter(VisitorCheckIn.visitor_id == visitor_id)
+            .all()
+        )
+    )
+    visit_dates.update(
+        collect_visit_dates(
+            db.query(func.date(VisitorActivity.created_at))
+            .filter(VisitorActivity.visitor_id == visitor_id)
+            .all()
+        )
+    )
+
+    return len(visit_dates)
+
+
+def visitor_read_payload(visitor: Visitor, visit_count: int = 0) -> dict[str, Any]:
+    data = VisitorRead.model_validate(visitor).model_dump()
+    data["visit_count"] = int(visit_count or 0)
+    return data
 
 
 @router.get("/visitors")
@@ -963,7 +948,13 @@ def list_visitors(
         )
 
     visitors = query.order_by(Visitor.created_at.desc(), Visitor.visitor_id.desc()).all()
-    data = [VisitorRead.model_validate(visitor).model_dump() for visitor in visitors]
+    data = [
+        visitor_read_payload(
+            visitor,
+            visitor_visit_count(db, visitor.visitor_id),
+        )
+        for visitor in visitors
+    ]
 
     return success_response(
         message="Visitors retrieved successfully",
@@ -992,7 +983,7 @@ def check_visitor_booking_match(
         message="Visitor booking match checked successfully",
         data={
             "phone": phone,
-            "visitor": VisitorRead.model_validate(visitor).model_dump() if visitor else None,
+            "visitor": visitor_read_payload(visitor) if visitor else None,
             "has_booking_today": len(bookings) > 0,
             "bookings_today": [
                 BookingRead.model_validate(booking).model_dump()
@@ -1012,7 +1003,8 @@ def get_visitor(visitor_id: int, db: Session = Depends(get_db)):
             error_code="VISITOR_NOT_FOUND",
         )
 
-    data = VisitorRead.model_validate(visitor).model_dump()
+    visit_count = visitor_visit_count(db, visitor.visitor_id)
+    data = visitor_read_payload(visitor, visit_count)
 
     return success_response(
         message="Visitor retrieved successfully",
@@ -1063,7 +1055,7 @@ def create_visitor(payload: VisitorCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(visitor)
 
-    data = VisitorRead.model_validate(visitor).model_dump()
+    data = visitor_read_payload(visitor)
 
     return success_response(
         message="Visitor created successfully",
@@ -1149,7 +1141,8 @@ def update_visitor(
     db.commit()
     db.refresh(visitor)
 
-    data = VisitorRead.model_validate(visitor).model_dump()
+    visit_count = visitor_visit_count(db, visitor.visitor_id)
+    data = visitor_read_payload(visitor, visit_count)
 
     return success_response(
         message="Visitor updated successfully",
@@ -1167,6 +1160,27 @@ def delete_visitor(visitor_id: int, db: Session = Depends(get_db)):
             error_code="VISITOR_NOT_FOUND",
         )
 
+    db.query(FaceProfile).filter(FaceProfile.visitor_id == visitor_id).delete(synchronize_session=False)
+    db.query(Booking).filter(Booking.visitor_id == visitor_id).update(
+        {Booking.visitor_id: None},
+        synchronize_session=False,
+    )
+    db.query(VisitSession).filter(VisitSession.visitor_id == visitor_id).update(
+        {VisitSession.visitor_id: None},
+        synchronize_session=False,
+    )
+    db.query(VisitorActivity).filter(VisitorActivity.visitor_id == visitor_id).update(
+        {VisitorActivity.visitor_id: None},
+        synchronize_session=False,
+    )
+    db.query(VisitorCheckIn).filter(VisitorCheckIn.visitor_id == visitor_id).update(
+        {VisitorCheckIn.visitor_id: None},
+        synchronize_session=False,
+    )
+    db.query(OtherAssistanceRequest).filter(OtherAssistanceRequest.visitor_id == visitor_id).update(
+        {OtherAssistanceRequest.visitor_id: None},
+        synchronize_session=False,
+    )
     db.delete(visitor)
     db.commit()
 
@@ -1181,11 +1195,86 @@ def delete_visitor(visitor_id: int, db: Session = Depends(get_db)):
 # ============================================================
 
 
+def activity_source(
+    visitor: Visitor | None,
+    visit_session: VisitSession | None,
+    activity: VisitorActivity | None = None,
+) -> str:
+    lead_source = str(getattr(visitor, "lead_source", "") or "").lower()
+    recognition_method = str(getattr(visit_session, "recognition_method", "") or "").lower()
+    selected_service = str(getattr(activity, "selected_service", "") or "").lower()
+    notes = str(getattr(activity, "notes", "") or "").lower()
+
+    if selected_service == "screen_booking" or "map screen" in notes:
+        return "map_screen"
+
+    if visit_session is not None:
+        return "map_screen" if "map" in recognition_method else "check_in_kiosk"
+
+    if "map" in lead_source:
+        return "map_screen"
+
+    return "check_in_kiosk"
+
+
+def previous_activity_for_activity(db: Session, activity: VisitorActivity) -> VisitorActivity | None:
+    if activity.visitor_id is None:
+        return None
+
+    activities = (
+        db.query(VisitorActivity)
+        .filter(VisitorActivity.visitor_id == activity.visitor_id)
+        .order_by(VisitorActivity.created_at.desc(), VisitorActivity.visitor_activity_id.desc())
+        .all()
+    )
+    candidates = []
+    for candidate in activities:
+        if candidate.visitor_activity_id == activity.visitor_activity_id:
+            continue
+        candidate_created_at = getattr(candidate, "created_at", None)
+        activity_created_at = getattr(activity, "created_at", None)
+        if candidate_created_at is None or activity_created_at is None:
+            candidates.append(candidate)
+            continue
+        if candidate_created_at < activity_created_at:
+            candidates.append(candidate)
+            continue
+        if (
+            candidate_created_at == activity_created_at
+            and candidate.visitor_activity_id < activity.visitor_activity_id
+        ):
+            candidates.append(candidate)
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda row: (
+            getattr(row, "created_at", None) or datetime.min,
+            getattr(row, "visitor_activity_id", 0) or 0,
+        ),
+        reverse=True,
+    )
+    return candidates[0]
+
+
+def previous_visit_purpose_for_activity(db: Session, activity: VisitorActivity) -> str | None:
+    previous = previous_activity_for_activity(db, activity)
+    if previous is None:
+        return None
+    return previous.visit_purpose or previous.notes or previous.previous_selected_service
+
+
 def visitor_activity_payload(
     activity: VisitorActivity,
     visitor: Visitor | None,
     visit_session: VisitSession | None,
+    previous_visit_purpose: str | None = None,
+    is_returning_visitor: bool | None = None,
 ) -> dict[str, Any]:
+    service = activity.selected_service or (
+        visit_session.current_selected_service if visit_session else None
+    )
     return {
         "visitor_activity_id": activity.visitor_activity_id,
         "visitor_id": activity.visitor_id,
@@ -1199,10 +1288,17 @@ def visitor_activity_payload(
         "last_visit_date": visit_session.check_in_time if visit_session else None,
         "previous_selected_service": activity.previous_selected_service,
         "current_visit_time": activity.created_at,
-        "current_selected_service": activity.selected_service,
+        "current_selected_service": service,
+        "service": service,
+        "source": activity_source(visitor, visit_session, activity),
         "visit_purpose": activity.visit_purpose,
+        "previous_visit_purpose": previous_visit_purpose,
         "notes": activity.notes,
-        "is_returning_visitor": visit_session.is_returning_visitor if visit_session else False,
+        "is_returning_visitor": (
+            is_returning_visitor
+            if is_returning_visitor is not None
+            else visit_session.is_returning_visitor if visit_session else False
+        ),
     }
 
 
@@ -1229,7 +1325,23 @@ def list_visitor_activity(
             if activity.visit_session_id
             else None
         )
-        row = visitor_activity_payload(activity, visitor, visit_session)
+        previous_activity = previous_activity_for_activity(db, activity)
+        previous_visit_purpose = (
+            previous_activity.visit_purpose or previous_activity.notes or previous_activity.previous_selected_service
+            if previous_activity is not None
+            else None
+        )
+        row = visitor_activity_payload(
+            activity,
+            visitor,
+            visit_session,
+            previous_visit_purpose=previous_visit_purpose,
+            is_returning_visitor=(
+                bool(getattr(visit_session, "is_returning_visitor", False))
+                if visit_session is not None
+                else previous_activity is not None
+            ),
+        )
 
         if search_text:
             searchable = " ".join(
@@ -1238,10 +1350,9 @@ def list_visitor_activity(
                     "visitor_name",
                     "visitor_phone",
                     "visitor_email",
-                    "company_name",
-                    "company_number",
-                    "current_selected_service",
-                    "previous_selected_service",
+                    "source",
+                    "previous_visit_purpose",
+                    "visit_purpose",
                 )
             ).lower()
             if search_text not in searchable:

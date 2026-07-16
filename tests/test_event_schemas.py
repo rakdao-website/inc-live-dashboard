@@ -1,5 +1,8 @@
 from datetime import date, time
 
+import pytest
+from pydantic import ValidationError
+
 from app.schemas import EventCreate
 
 
@@ -30,3 +33,25 @@ def test_event_create_defaults_blank_location_to_event_area():
     )
 
     assert event.event_location == "Event Area"
+
+
+def test_event_create_rejects_times_outside_operating_hours():
+    with pytest.raises(ValidationError, match="between 9:00 AM and 5:00 PM"):
+        EventCreate(
+            zone_id="EVT_1",
+            event_name="Early Standup",
+            event_date=date(2026, 7, 7),
+            event_time_start=time(8, 45),
+            event_time_end=time(9, 30),
+            event_organizer="events",
+        )
+
+    with pytest.raises(ValidationError, match="between 9:00 AM and 5:00 PM"):
+        EventCreate(
+            zone_id="EVT_1",
+            event_name="Late Mixer",
+            event_date=date(2026, 7, 7),
+            event_time_start=time(16, 30),
+            event_time_end=time(17, 30),
+            event_organizer="events",
+        )
