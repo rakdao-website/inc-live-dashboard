@@ -1,0 +1,17 @@
+.env
+__pycache__/
+*.py[cod]
+*.sqlite
+*.db
+.pytest_cache/
+
+.venv/
+venv/
+
+.vscode/
+.idea/
+
+.DS_Store
+Thumbs.db
+
+docs/admin_backend_mvp_notes.md

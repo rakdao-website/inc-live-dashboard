@@ -1,0 +1,1459 @@
+from datetime import date as DateType, datetime
+from typing import Any, Optional
+
+from fastapi import APIRouter, Depends, Query, status
+from fastapi.responses import JSONResponse
+from sqlalchemy import func
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+
+from app.config import settings
+from app.database import get_db
+from app.kiosk_flow_services import schedule_has_conflict
+from app.models import (
+    AdminZone,
+    Booking,
+    EcosystemMetric,
+    Event,
+    FaceProfile,
+    LiveActivityFeed,
+    LiveActivityMetric,
+    LiveBooking,
+    LiveEvent,
+    OtherAssistanceRequest,
+    VisitSession,
+    Visitor,
+    VisitorActivity,
+    VisitorCheckIn,
+    Zone,
+)
+from app.operating_hours import OPERATING_HOURS_MESSAGE, is_within_operating_hours
+from app.schemas import (
+    AdminLoginRequest,
+    AdminLoginResponse,
+    AdminZoneRead,
+    BookingCreate,
+    BookingRead,
+    BookingUpdate,
+    EcosystemMetricRead,
+    EcosystemMetricUpdate,
+    EventCreate,
+    EventRead,
+    EventUpdate,
+    LiveActivityFeedRead,
+    LiveActivityMetricRead,
+    VisitorCreate,
+    VisitorRead,
+    VisitorUpdate,
+    ZoneClosedResponse,
+)
+from app.services import booking_status, now_dubai
+
+
+router = APIRouter(
+    prefix="/admin",
+    tags=["Admin"],
+)
+
+
+def success_response(
+    message: str = "Request completed successfully",
+    data: Any = None,
+) -> dict[str, Any]:
+    return {
+        "success": True,
+        "message": message,
+        "data": {} if data is None else data,
+    }
+
+
+def error_response(
+    message: str,
+    error_code: str,
+    details: Any = None,
+) -> dict[str, Any]:
+    return {
+        "success": False,
+        "message": message,
+        "error_code": error_code,
+        "details": details,
+    }
+
+
+def not_found_response(message: str, error_code: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_404_NOT_FOUND,
+        content=error_response(
+            message=message,
+            error_code=error_code,
+        ),
+    )
+
+
+def bad_request_response(message: str, error_code: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        content=error_response(
+            message=message,
+            error_code=error_code,
+        ),
+    )
+
+
+def conflict_response(message: str, error_code: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content=error_response(
+            message=message,
+            error_code=error_code,
+        ),
+    )
+
+
+def get_database_current_date(db: Session) -> DateType:
+    return db.query(func.current_date()).scalar()
+
+
+def validate_bookable_open_zone(zone_id: str, db: Session) -> JSONResponse | None:
+    zone = db.get(Zone, zone_id)
+
+    if zone is None:
+        return not_found_response(
+            message="Zone not found",
+            error_code="ZONE_NOT_FOUND",
+        )
+
+    if not zone.is_bookable:
+        return bad_request_response(
+            message="Zone is not bookable",
+            error_code="ZONE_NOT_BOOKABLE",
+        )
+
+    if zone.is_closed:
+        return bad_request_response(
+            message="Zone is closed",
+            error_code="ZONE_CLOSED",
+        )
+
+    return None
+
+
+def upsert_visitor_from_booking(booking: Booking, db: Session) -> None:
+    if not booking.visitor_phone:
+        return
+
+    visitor = (
+        db.query(Visitor)
+        .filter(Visitor.visitor_phone == booking.visitor_phone)
+        .first()
+    )
+
+    if visitor is None:
+        visitor = Visitor(
+            visitor_name=booking.visitor_name or booking.booking_name,
+            visitor_phone=booking.visitor_phone,
+            visitor_email=booking.visitor_email,
+            is_existing_client=booking.visitor_is_client,
+            lead_source="admin_booking_tab",
+        )
+        db.add(visitor)
+        if hasattr(db, "flush"):
+            db.flush()
+        if getattr(visitor, "visitor_id", None) is not None:
+            booking.visitor_id = visitor.visitor_id
+        return
+
+    booking.visitor_id = visitor.visitor_id
+    if booking.visitor_name:
+        visitor.visitor_name = booking.visitor_name
+
+    if booking.visitor_email:
+        visitor.visitor_email = booking.visitor_email
+
+    visitor.is_existing_client = visitor.is_existing_client or booking.visitor_is_client
+    if not visitor.lead_source:
+        visitor.lead_source = "admin_booking_tab"
+    visitor.updated_at = db.query(func.current_timestamp()).scalar()
+
+
+def is_overlap_error(exc: SQLAlchemyError) -> bool:
+    error_text = str(exc).lower()
+    return "overlaps" in error_text or "overlap" in error_text
+
+
+@router.post("/auth/login")
+def admin_login(payload: AdminLoginRequest):
+    if (
+        payload.username != settings.admin_username
+        or payload.password != settings.admin_password
+    ):
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content=error_response(
+                message="Invalid username or password",
+                error_code="INVALID_ADMIN_LOGIN",
+            ),
+        )
+
+    user = AdminLoginResponse(
+        username=settings.admin_username,
+        role=settings.admin_role,
+    )
+
+    return success_response(
+        message="Signed in successfully",
+        data=user.model_dump(),
+    )
+
+
+@router.get("/health")
+def admin_health_check():
+    return success_response(
+        message="Admin router is available",
+        data={
+            "status": "ok",
+        },
+    )
+
+
+# ============================================================
+# Zones Admin API
+# ============================================================
+
+
+@router.get("/zones")
+def list_zones(db: Session = Depends(get_db)):
+    zones = (
+        db.query(AdminZone)
+        .order_by(AdminZone.zone_name)
+        .all()
+    )
+
+    data = [
+        AdminZoneRead.model_validate(zone).model_dump()
+        for zone in zones
+    ]
+
+    return success_response(
+        message="Zones retrieved successfully",
+        data=data,
+    )
+
+
+@router.get("/zones/{zone_id}")
+def get_zone(zone_id: str, db: Session = Depends(get_db)):
+    zone = (
+        db.query(AdminZone)
+        .filter(AdminZone.zone_id == zone_id)
+        .first()
+    )
+
+    if zone is None:
+        return not_found_response(
+            message="Zone not found",
+            error_code="ZONE_NOT_FOUND",
+        )
+
+    data = AdminZoneRead.model_validate(zone).model_dump()
+
+    return success_response(
+        message="Zone retrieved successfully",
+        data=data,
+    )
+
+
+@router.patch("/zones/{zone_id}/close")
+def close_zone(zone_id: str, db: Session = Depends(get_db)):
+    zone = db.get(Zone, zone_id)
+
+    if zone is None:
+        return not_found_response(
+            message="Zone not found",
+            error_code="ZONE_NOT_FOUND",
+        )
+
+    zone.is_closed = True
+    zone.updated_at = func.current_timestamp()
+
+    db.commit()
+
+    data = ZoneClosedResponse(
+        zone_id=zone_id,
+        is_closed=True,
+    ).model_dump()
+
+    return success_response(
+        message="Zone closed successfully",
+        data=data,
+    )
+
+
+@router.patch("/zones/{zone_id}/reopen")
+def reopen_zone(zone_id: str, db: Session = Depends(get_db)):
+    zone = db.get(Zone, zone_id)
+
+    if zone is None:
+        return not_found_response(
+            message="Zone not found",
+            error_code="ZONE_NOT_FOUND",
+        )
+
+    zone.is_closed = False
+    zone.updated_at = func.current_timestamp()
+
+    db.commit()
+
+    data = ZoneClosedResponse(
+        zone_id=zone_id,
+        is_closed=False,
+    ).model_dump()
+
+    return success_response(
+        message="Zone reopened successfully",
+        data=data,
+    )
+
+
+# ============================================================
+# Ecosystem Metrics Admin API
+# ============================================================
+
+
+@router.get("/ecosystem/current")
+def get_current_ecosystem_metrics(db: Session = Depends(get_db)):
+    today = get_database_current_date(db)
+
+    metrics = (
+        db.query(EcosystemMetric)
+        .filter(EcosystemMetric.snapshot_date == today)
+        .first()
+    )
+
+    if metrics is None:
+        metrics = (
+            db.query(EcosystemMetric)
+            .order_by(EcosystemMetric.snapshot_date.desc())
+            .first()
+        )
+
+    if metrics is None:
+        return not_found_response(
+            message="Ecosystem metrics not found",
+            error_code="ECOSYSTEM_METRICS_NOT_FOUND",
+        )
+
+    data = EcosystemMetricRead.model_validate(metrics).model_dump()
+
+    return success_response(
+        message="Ecosystem metrics retrieved successfully",
+        data=data,
+    )
+
+
+@router.put("/ecosystem/current")
+def update_current_ecosystem_metrics(
+    payload: EcosystemMetricUpdate,
+    db: Session = Depends(get_db),
+):
+    target_date = payload.snapshot_date or get_database_current_date(db)
+
+    metrics = (
+        db.query(EcosystemMetric)
+        .filter(EcosystemMetric.snapshot_date == target_date)
+        .first()
+    )
+
+    if metrics is None:
+        metrics = EcosystemMetric(
+            snapshot_date=target_date,
+            active_companies=payload.active_companies,
+            active_licenses=payload.active_licenses,
+        )
+        db.add(metrics)
+    else:
+        metrics.active_companies = payload.active_companies
+        metrics.active_licenses = payload.active_licenses
+        metrics.recorded_at = func.current_timestamp()
+
+    db.commit()
+    db.refresh(metrics)
+
+    data = EcosystemMetricRead.model_validate(metrics).model_dump()
+
+    return success_response(
+        message="Ecosystem metrics updated successfully",
+        data=data,
+    )
+
+
+# ============================================================
+# Events Management Admin API
+# ============================================================
+
+
+@router.get("/events")
+def list_events(
+    event_date: Optional[DateType] = Query(default=None),
+    zone_id: Optional[str] = Query(default=None),
+    status_filter: Optional[str] = Query(default=None, alias="status"),
+    db: Session = Depends(get_db),
+):
+    query = db.query(LiveEvent)
+
+    if event_date is not None:
+        query = query.filter(LiveEvent.event_date == event_date)
+
+    if zone_id is not None:
+        query = query.filter(LiveEvent.zone_id == zone_id)
+
+    if status_filter is not None:
+        query = query.filter(LiveEvent.event_status == status_filter)
+
+    events = (
+        query
+        .order_by(LiveEvent.event_date, LiveEvent.event_time_start)
+        .all()
+    )
+
+    data = [
+        EventRead.model_validate(event).model_dump()
+        for event in events
+    ]
+
+    return success_response(
+        message="Events retrieved successfully",
+        data=data,
+    )
+
+
+@router.get("/events/{event_id}")
+def get_event(event_id: int, db: Session = Depends(get_db)):
+    event = db.get(LiveEvent, event_id)
+
+    if event is None:
+        return not_found_response(
+            message="Event not found",
+            error_code="EVENT_NOT_FOUND",
+        )
+
+    data = EventRead.model_validate(event).model_dump()
+
+    return success_response(
+        message="Event retrieved successfully",
+        data=data,
+    )
+
+
+@router.post("/events", status_code=status.HTTP_201_CREATED)
+def create_event(payload: EventCreate, db: Session = Depends(get_db)):
+    zone_error = validate_bookable_open_zone(payload.zone_id, db)
+
+    if zone_error is not None:
+        return zone_error
+
+    if schedule_has_conflict(
+        db,
+        zone_id=payload.zone_id,
+        schedule_date=payload.event_date,
+        start_time=payload.event_time_start,
+        end_time=payload.event_time_end,
+    ):
+        return conflict_response(
+            message="This event overlaps another event or booking in the selected zone",
+            error_code="EVENT_OVERLAP",
+        )
+
+    event = Event(
+        zone_id=payload.zone_id,
+        event_name=payload.event_name,
+        event_date=payload.event_date,
+        event_time_start=payload.event_time_start,
+        event_time_end=payload.event_time_end,
+        event_location=payload.event_location,
+        event_organizer=payload.event_organizer,
+        event_attendee_count=payload.event_attendee_count,
+    )
+
+    db.add(event)
+
+    try:
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+
+        if is_overlap_error(exc):
+            return conflict_response(
+                message="This event overlaps another event or booking in the selected zone",
+                error_code="EVENT_OVERLAP",
+            )
+
+        raise
+
+    db.refresh(event)
+
+    live_event = db.get(LiveEvent, event.event_id)
+    data = EventRead.model_validate(live_event).model_dump()
+
+    return success_response(
+        message="Event created successfully",
+        data=data,
+    )
+
+
+@router.patch("/events/{event_id}")
+def update_event(
+    event_id: int,
+    payload: EventUpdate,
+    db: Session = Depends(get_db),
+):
+    event = db.get(Event, event_id)
+
+    if event is None:
+        return not_found_response(
+            message="Event not found",
+            error_code="EVENT_NOT_FOUND",
+        )
+
+    update_data = payload.model_dump(exclude_unset=True)
+
+    target_zone_id = update_data.get("zone_id", event.zone_id)
+    zone_error = validate_bookable_open_zone(target_zone_id, db)
+
+    if zone_error is not None:
+        return zone_error
+
+    target_start = update_data.get("event_time_start", event.event_time_start)
+    target_end = update_data.get("event_time_end", event.event_time_end)
+
+    if target_end <= target_start:
+        return bad_request_response(
+            message="event_time_end must be after event_time_start",
+            error_code="INVALID_TIME_RANGE",
+        )
+
+    if not is_within_operating_hours(target_start, target_end):
+        return bad_request_response(
+            message=OPERATING_HOURS_MESSAGE,
+            error_code="OUTSIDE_OPERATING_HOURS",
+        )
+
+    target_event_date = update_data.get("event_date", event.event_date)
+    if schedule_has_conflict(
+        db,
+        zone_id=target_zone_id,
+        schedule_date=target_event_date,
+        start_time=target_start,
+        end_time=target_end,
+        exclude_event_id=event.event_id,
+    ):
+        return conflict_response(
+            message="This event overlaps another event or booking in the selected zone",
+            error_code="EVENT_OVERLAP",
+        )
+
+    if "zone_id" in update_data:
+        event.zone_id = update_data["zone_id"]
+
+    if "event_name" in update_data:
+        event.event_name = update_data["event_name"]
+
+    if "event_date" in update_data:
+        event.event_date = update_data["event_date"]
+
+    if "event_time_start" in update_data:
+        event.event_time_start = update_data["event_time_start"]
+
+    if "event_time_end" in update_data:
+        event.event_time_end = update_data["event_time_end"]
+
+    if "event_location" in update_data:
+        event.event_location = update_data["event_location"]
+
+    if "event_organizer" in update_data:
+        event.event_organizer = update_data["event_organizer"]
+
+    if "event_attendee_count" in update_data:
+        event.event_attendee_count = update_data["event_attendee_count"]
+
+    try:
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+
+        if is_overlap_error(exc):
+            return conflict_response(
+                message="This event overlaps another event or booking in the selected zone",
+                error_code="EVENT_OVERLAP",
+            )
+
+        raise
+
+    db.refresh(event)
+
+    live_event = db.get(LiveEvent, event.event_id)
+    data = EventRead.model_validate(live_event).model_dump()
+
+    return success_response(
+        message="Event updated successfully",
+        data=data,
+    )
+
+
+# ============================================================
+# Booking Management Admin API
+# ============================================================
+
+
+def admin_booking_payload(booking: LiveBooking, now: datetime | None = None) -> dict[str, Any]:
+    data = BookingRead.model_validate(booking).model_dump()
+    data["booking_status"] = booking_status(booking, now or now_dubai())
+    return data
+
+
+@router.get("/bookings")
+def list_bookings(
+    booking_date: Optional[DateType] = Query(default=None),
+    zone_id: Optional[str] = Query(default=None),
+    booking_type: Optional[str] = Query(default=None),
+    status_filter: Optional[str] = Query(default=None, alias="status"),
+    db: Session = Depends(get_db),
+):
+    query = db.query(LiveBooking)
+
+    if booking_date is not None:
+        query = query.filter(LiveBooking.booking_date == booking_date)
+
+    if zone_id is not None:
+        query = query.filter(LiveBooking.zone_id == zone_id)
+
+    if booking_type is not None:
+        query = query.filter(LiveBooking.booking_type == booking_type)
+
+    bookings = (
+        query
+        .order_by(LiveBooking.booking_date, LiveBooking.booking_time_start)
+        .all()
+    )
+
+    data = [
+        admin_booking_payload(booking)
+        for booking in bookings
+    ]
+    if status_filter is not None:
+        data = [
+            booking
+            for booking in data
+            if booking["booking_status"] == status_filter
+        ]
+
+    return success_response(
+        message="Bookings retrieved successfully",
+        data=data,
+    )
+
+
+@router.get("/bookings/{booking_id}")
+def get_booking(booking_id: int, db: Session = Depends(get_db)):
+    booking = db.get(LiveBooking, booking_id)
+
+    if booking is None:
+        return not_found_response(
+            message="Booking not found",
+            error_code="BOOKING_NOT_FOUND",
+        )
+
+    data = admin_booking_payload(booking)
+
+    return success_response(
+        message="Booking retrieved successfully",
+        data=data,
+    )
+
+
+@router.post("/bookings", status_code=status.HTTP_201_CREATED)
+def create_booking(payload: BookingCreate, db: Session = Depends(get_db)):
+    zone_error = validate_bookable_open_zone(payload.zone_id, db)
+
+    if zone_error is not None:
+        return zone_error
+
+    if schedule_has_conflict(
+        db,
+        zone_id=payload.zone_id,
+        schedule_date=payload.booking_date or payload.booking_start_date,
+        start_time=payload.booking_time_start,
+        end_time=payload.booking_time_end,
+    ):
+        return conflict_response(
+            message="This booking overlaps another booking or event in the selected zone",
+            error_code="BOOKING_OVERLAP",
+        )
+
+    booking = Booking(
+        visitor_id=payload.visitor_id,
+        zone_id=payload.zone_id,
+        booking_type=payload.booking_type,
+        booking_name=payload.booking_name,
+        visitor_name=payload.visitor_name,
+        visitor_phone=payload.visitor_phone,
+        visitor_email=payload.visitor_email,
+        visitor_is_client=payload.visitor_is_client,
+        booking_start_date=payload.booking_start_date,
+        booking_end_date=payload.booking_end_date,
+        booking_date=payload.booking_date,
+        booking_time_start=payload.booking_time_start,
+        booking_time_end=payload.booking_time_end,
+    )
+
+    db.add(booking)
+    upsert_visitor_from_booking(booking, db)
+
+    try:
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+
+        if is_overlap_error(exc):
+            return conflict_response(
+                message="This booking overlaps another booking or event in the selected zone",
+                error_code="BOOKING_OVERLAP",
+            )
+
+        raise
+
+    db.refresh(booking)
+
+    live_booking = db.get(LiveBooking, booking.booking_id)
+    data = admin_booking_payload(live_booking)
+
+    return success_response(
+        message="Booking created successfully",
+        data=data,
+    )
+
+
+@router.patch("/bookings/{booking_id}")
+def update_booking(
+    booking_id: int,
+    payload: BookingUpdate,
+    db: Session = Depends(get_db),
+):
+    booking = db.get(Booking, booking_id)
+
+    if booking is None:
+        return not_found_response(
+            message="Booking not found",
+            error_code="BOOKING_NOT_FOUND",
+        )
+
+    update_data = payload.model_dump(exclude_unset=True)
+
+    target_zone_id = update_data.get("zone_id", booking.zone_id)
+    zone_error = validate_bookable_open_zone(target_zone_id, db)
+
+    if zone_error is not None:
+        return zone_error
+
+    target_start = update_data.get("booking_time_start", booking.booking_time_start)
+    target_end = update_data.get("booking_time_end", booking.booking_time_end)
+    target_start_date = update_data.get("booking_start_date", booking.booking_start_date)
+    target_end_date = update_data.get("booking_end_date", booking.booking_end_date)
+
+    if target_end_date < target_start_date:
+        return bad_request_response(
+            message="booking_end_date must be on or after booking_start_date",
+            error_code="INVALID_DATE_RANGE",
+        )
+
+    if target_end <= target_start:
+        return bad_request_response(
+            message="booking_time_end must be after booking_time_start",
+            error_code="INVALID_TIME_RANGE",
+        )
+
+    if not is_within_operating_hours(target_start, target_end):
+        return bad_request_response(
+            message=OPERATING_HOURS_MESSAGE,
+            error_code="OUTSIDE_OPERATING_HOURS",
+        )
+
+    target_booking_date = update_data.get(
+        "booking_date",
+        update_data.get("booking_start_date", booking.booking_date),
+    )
+    if schedule_has_conflict(
+        db,
+        zone_id=target_zone_id,
+        schedule_date=target_booking_date,
+        start_time=target_start,
+        end_time=target_end,
+        exclude_booking_id=booking.booking_id,
+    ):
+        return conflict_response(
+            message="This booking overlaps another booking or event in the selected zone",
+            error_code="BOOKING_OVERLAP",
+        )
+
+    if "zone_id" in update_data:
+        booking.zone_id = update_data["zone_id"]
+
+    if "visitor_id" in update_data:
+        booking.visitor_id = update_data["visitor_id"]
+
+    if "booking_type" in update_data:
+        booking.booking_type = update_data["booking_type"]
+
+    if "booking_name" in update_data:
+        booking.booking_name = update_data["booking_name"]
+
+    if "visitor_name" in update_data:
+        booking.visitor_name = update_data["visitor_name"]
+
+    if "visitor_phone" in update_data:
+        booking.visitor_phone = update_data["visitor_phone"]
+
+    if "visitor_email" in update_data:
+        booking.visitor_email = update_data["visitor_email"]
+
+    if "visitor_is_client" in update_data:
+        booking.visitor_is_client = update_data["visitor_is_client"]
+
+    if "booking_start_date" in update_data:
+        booking.booking_start_date = update_data["booking_start_date"]
+
+    if "booking_end_date" in update_data:
+        booking.booking_end_date = update_data["booking_end_date"]
+
+    if "booking_date" in update_data:
+        booking.booking_date = update_data["booking_date"]
+    elif "booking_start_date" in update_data:
+        booking.booking_date = update_data["booking_start_date"]
+
+    if "booking_time_start" in update_data:
+        booking.booking_time_start = update_data["booking_time_start"]
+
+    if "booking_time_end" in update_data:
+        booking.booking_time_end = update_data["booking_time_end"]
+
+    upsert_visitor_from_booking(booking, db)
+
+    try:
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+
+        if is_overlap_error(exc):
+            return conflict_response(
+                message="This booking overlaps another booking or event in the selected zone",
+                error_code="BOOKING_OVERLAP",
+            )
+
+        raise
+
+    db.refresh(booking)
+
+    live_booking = db.get(LiveBooking, booking.booking_id)
+    data = admin_booking_payload(live_booking)
+
+    return success_response(
+        message="Booking updated successfully",
+        data=data,
+    )
+
+
+# ============================================================
+# Visitors Management Admin API
+# ============================================================
+
+
+def normalise_visit_date(value: Any) -> DateType | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, DateType):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value).date()
+        except ValueError:
+            try:
+                return DateType.fromisoformat(value[:10])
+            except ValueError:
+                return None
+    return None
+
+
+def collect_visit_dates(rows: list[Any]) -> set[DateType]:
+    dates: set[DateType] = set()
+    for row in rows:
+        try:
+            raw_value = row[0]
+        except (TypeError, KeyError, IndexError):
+            raw_value = row
+        visit_date = normalise_visit_date(raw_value)
+        if visit_date is not None:
+            dates.add(visit_date)
+    return dates
+
+
+def visitor_visit_count(db: Session, visitor_id: int) -> int:
+    visit_dates: set[DateType] = set()
+
+    visit_dates.update(
+        collect_visit_dates(
+            db.query(func.date(VisitSession.check_in_time))
+            .filter(VisitSession.visitor_id == visitor_id)
+            .all()
+        )
+    )
+    visit_dates.update(
+        collect_visit_dates(
+            db.query(func.date(VisitorCheckIn.check_in_time))
+            .filter(VisitorCheckIn.visitor_id == visitor_id)
+            .all()
+        )
+    )
+    visit_dates.update(
+        collect_visit_dates(
+            db.query(func.date(VisitorActivity.created_at))
+            .filter(VisitorActivity.visitor_id == visitor_id)
+            .all()
+        )
+    )
+
+    return len(visit_dates)
+
+
+def visitor_read_payload(visitor: Visitor, visit_count: int = 0) -> dict[str, Any]:
+    data = VisitorRead.model_validate(visitor).model_dump()
+    data["visit_count"] = int(visit_count or 0)
+    return data
+
+
+@router.get("/visitors")
+def list_visitors(
+    search: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    query = db.query(Visitor)
+
+    if search:
+        pattern = f"%{search}%"
+        query = query.filter(
+            (Visitor.visitor_name.ilike(pattern))
+            | (Visitor.visitor_phone.ilike(pattern))
+            | (Visitor.visitor_email.ilike(pattern))
+            | (Visitor.license_number.ilike(pattern))
+        )
+
+    visitors = query.order_by(Visitor.created_at.desc(), Visitor.visitor_id.desc()).all()
+    data = [
+        visitor_read_payload(
+            visitor,
+            visitor_visit_count(db, visitor.visitor_id),
+        )
+        for visitor in visitors
+    ]
+
+    return success_response(
+        message="Visitors retrieved successfully",
+        data=data,
+    )
+
+
+@router.get("/visitors/check-in-match")
+def check_visitor_booking_match(
+    phone: str = Query(..., min_length=1),
+    db: Session = Depends(get_db),
+):
+    current_date = get_database_current_date(db)
+    visitor = db.query(Visitor).filter(Visitor.visitor_phone == phone).first()
+    bookings = (
+        db.query(LiveBooking)
+        .filter(
+            LiveBooking.visitor_phone == phone,
+            LiveBooking.booking_date == current_date,
+        )
+        .order_by(LiveBooking.booking_time_start)
+        .all()
+    )
+
+    return success_response(
+        message="Visitor booking match checked successfully",
+        data={
+            "phone": phone,
+            "visitor": visitor_read_payload(visitor) if visitor else None,
+            "has_booking_today": len(bookings) > 0,
+            "bookings_today": [
+                BookingRead.model_validate(booking).model_dump()
+                for booking in bookings
+            ],
+        },
+    )
+
+
+@router.get("/visitors/{visitor_id}")
+def get_visitor(visitor_id: int, db: Session = Depends(get_db)):
+    visitor = db.get(Visitor, visitor_id)
+
+    if visitor is None:
+        return not_found_response(
+            message="Visitor not found",
+            error_code="VISITOR_NOT_FOUND",
+        )
+
+    visit_count = visitor_visit_count(db, visitor.visitor_id)
+    data = visitor_read_payload(visitor, visit_count)
+
+    return success_response(
+        message="Visitor retrieved successfully",
+        data=data,
+    )
+
+
+@router.post("/visitors", status_code=status.HTTP_201_CREATED)
+def create_visitor(payload: VisitorCreate, db: Session = Depends(get_db)):
+    existing_visitor = (
+        db.query(Visitor)
+        .filter(Visitor.visitor_phone == payload.visitor_phone)
+        .first()
+    )
+
+    if existing_visitor is not None:
+        return conflict_response(
+            message="A visitor with this phone number already exists",
+            error_code="VISITOR_PHONE_EXISTS",
+        )
+
+    if payload.license_number:
+        existing_license = (
+            db.query(Visitor)
+            .filter(Visitor.license_number == payload.license_number)
+            .first()
+        )
+
+        if existing_license is not None:
+            return conflict_response(
+                message="A visitor with this license number already exists",
+                error_code="VISITOR_LICENSE_EXISTS",
+            )
+
+    visitor = Visitor(
+        visitor_name=payload.visitor_name,
+        visitor_phone=payload.visitor_phone,
+        visitor_email=payload.visitor_email,
+        license_number=payload.license_number,
+        is_existing_client=payload.is_existing_client,
+        face_reference_id=payload.face_reference_id,
+        face_consent_given=payload.face_consent_given,
+        face_consent_at=payload.face_consent_at,
+        lead_source=payload.lead_source,
+    )
+
+    db.add(visitor)
+    db.commit()
+    db.refresh(visitor)
+
+    data = visitor_read_payload(visitor)
+
+    return success_response(
+        message="Visitor created successfully",
+        data=data,
+    )
+
+
+@router.patch("/visitors/{visitor_id}")
+def update_visitor(
+    visitor_id: int,
+    payload: VisitorUpdate,
+    db: Session = Depends(get_db),
+):
+    visitor = db.get(Visitor, visitor_id)
+
+    if visitor is None:
+        return not_found_response(
+            message="Visitor not found",
+            error_code="VISITOR_NOT_FOUND",
+        )
+
+    update_data = payload.model_dump(exclude_unset=True)
+
+    if "visitor_phone" in update_data and update_data["visitor_phone"] != visitor.visitor_phone:
+        existing_visitor = (
+            db.query(Visitor)
+            .filter(Visitor.visitor_phone == update_data["visitor_phone"])
+            .first()
+        )
+
+        if existing_visitor is not None:
+            return conflict_response(
+                message="A visitor with this phone number already exists",
+                error_code="VISITOR_PHONE_EXISTS",
+            )
+
+    if (
+        "license_number" in update_data
+        and update_data["license_number"]
+        and update_data["license_number"] != visitor.license_number
+    ):
+        existing_license = (
+            db.query(Visitor)
+            .filter(Visitor.license_number == update_data["license_number"])
+            .first()
+        )
+
+        if existing_license is not None:
+            return conflict_response(
+                message="A visitor with this license number already exists",
+                error_code="VISITOR_LICENSE_EXISTS",
+            )
+
+    if "visitor_name" in update_data:
+        visitor.visitor_name = update_data["visitor_name"]
+
+    if "visitor_phone" in update_data:
+        visitor.visitor_phone = update_data["visitor_phone"]
+
+    if "visitor_email" in update_data:
+        visitor.visitor_email = update_data["visitor_email"]
+
+    if "license_number" in update_data:
+        visitor.license_number = update_data["license_number"]
+
+    if "is_existing_client" in update_data:
+        visitor.is_existing_client = update_data["is_existing_client"]
+
+    if "face_reference_id" in update_data:
+        visitor.face_reference_id = update_data["face_reference_id"]
+
+    if "face_consent_given" in update_data:
+        visitor.face_consent_given = update_data["face_consent_given"]
+
+    if "face_consent_at" in update_data:
+        visitor.face_consent_at = update_data["face_consent_at"]
+
+    if "lead_source" in update_data:
+        visitor.lead_source = update_data["lead_source"]
+
+    visitor.updated_at = db.query(func.current_timestamp()).scalar()
+
+    db.commit()
+    db.refresh(visitor)
+
+    visit_count = visitor_visit_count(db, visitor.visitor_id)
+    data = visitor_read_payload(visitor, visit_count)
+
+    return success_response(
+        message="Visitor updated successfully",
+        data=data,
+    )
+
+
+@router.delete("/visitors/{visitor_id}")
+def delete_visitor(visitor_id: int, db: Session = Depends(get_db)):
+    visitor = db.get(Visitor, visitor_id)
+
+    if visitor is None:
+        return not_found_response(
+            message="Visitor not found",
+            error_code="VISITOR_NOT_FOUND",
+        )
+
+    db.query(FaceProfile).filter(FaceProfile.visitor_id == visitor_id).delete(synchronize_session=False)
+    db.query(Booking).filter(Booking.visitor_id == visitor_id).update(
+        {Booking.visitor_id: None},
+        synchronize_session=False,
+    )
+    db.query(VisitSession).filter(VisitSession.visitor_id == visitor_id).update(
+        {VisitSession.visitor_id: None},
+        synchronize_session=False,
+    )
+    db.query(VisitorActivity).filter(VisitorActivity.visitor_id == visitor_id).update(
+        {VisitorActivity.visitor_id: None},
+        synchronize_session=False,
+    )
+    db.query(VisitorCheckIn).filter(VisitorCheckIn.visitor_id == visitor_id).update(
+        {VisitorCheckIn.visitor_id: None},
+        synchronize_session=False,
+    )
+    db.query(OtherAssistanceRequest).filter(OtherAssistanceRequest.visitor_id == visitor_id).update(
+        {OtherAssistanceRequest.visitor_id: None},
+        synchronize_session=False,
+    )
+    db.delete(visitor)
+    db.commit()
+
+    return success_response(
+        message="Visitor deleted successfully",
+        data={"visitor_id": visitor_id},
+    )
+
+
+# ============================================================
+# Visitor Activity Admin API
+# ============================================================
+
+
+def activity_source(
+    visitor: Visitor | None,
+    visit_session: VisitSession | None,
+    activity: VisitorActivity | None = None,
+) -> str:
+    lead_source = str(getattr(visitor, "lead_source", "") or "").lower()
+    recognition_method = str(getattr(visit_session, "recognition_method", "") or "").lower()
+    selected_service = str(getattr(activity, "selected_service", "") or "").lower()
+    notes = str(getattr(activity, "notes", "") or "").lower()
+
+    if selected_service == "screen_booking" or "map screen" in notes:
+        return "map_screen"
+
+    if visit_session is not None:
+        return "map_screen" if "map" in recognition_method else "check_in_kiosk"
+
+    if "map" in lead_source:
+        return "map_screen"
+
+    return "check_in_kiosk"
+
+
+def previous_activity_for_activity(db: Session, activity: VisitorActivity) -> VisitorActivity | None:
+    if activity.visitor_id is None:
+        return None
+
+    activities = (
+        db.query(VisitorActivity)
+        .filter(VisitorActivity.visitor_id == activity.visitor_id)
+        .order_by(VisitorActivity.created_at.desc(), VisitorActivity.visitor_activity_id.desc())
+        .all()
+    )
+    candidates = []
+    for candidate in activities:
+        if candidate.visitor_activity_id == activity.visitor_activity_id:
+            continue
+        candidate_created_at = getattr(candidate, "created_at", None)
+        activity_created_at = getattr(activity, "created_at", None)
+        if candidate_created_at is None or activity_created_at is None:
+            candidates.append(candidate)
+            continue
+        if candidate_created_at < activity_created_at:
+            candidates.append(candidate)
+            continue
+        if (
+            candidate_created_at == activity_created_at
+            and candidate.visitor_activity_id < activity.visitor_activity_id
+        ):
+            candidates.append(candidate)
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda row: (
+            getattr(row, "created_at", None) or datetime.min,
+            getattr(row, "visitor_activity_id", 0) or 0,
+        ),
+        reverse=True,
+    )
+    return candidates[0]
+
+
+def previous_visit_purpose_for_activity(db: Session, activity: VisitorActivity) -> str | None:
+    previous = previous_activity_for_activity(db, activity)
+    if previous is None:
+        return None
+    return previous.visit_purpose or previous.notes or previous.previous_selected_service
+
+
+def visitor_activity_payload(
+    activity: VisitorActivity,
+    visitor: Visitor | None,
+    visit_session: VisitSession | None,
+    previous_visit_purpose: str | None = None,
+    is_returning_visitor: bool | None = None,
+) -> dict[str, Any]:
+    service = activity.selected_service or (
+        visit_session.current_selected_service if visit_session else None
+    )
+    return {
+        "visitor_activity_id": activity.visitor_activity_id,
+        "visitor_id": activity.visitor_id,
+        "visit_session_id": activity.visit_session_id,
+        "visitor_name": visitor.visitor_name if visitor else None,
+        "visitor_phone": visitor.visitor_phone if visitor else None,
+        "visitor_email": visitor.visitor_email if visitor else None,
+        "visitor_type": getattr(visitor, "visitor_type", "visitor") if visitor else None,
+        "company_name": getattr(visitor, "company_name", None) if visitor else None,
+        "company_number": getattr(visitor, "company_number", None) if visitor else None,
+        "last_visit_date": visit_session.check_in_time if visit_session else None,
+        "previous_selected_service": activity.previous_selected_service,
+        "current_visit_time": activity.created_at,
+        "current_selected_service": service,
+        "service": service,
+        "source": activity_source(visitor, visit_session, activity),
+        "visit_purpose": activity.visit_purpose,
+        "previous_visit_purpose": previous_visit_purpose,
+        "notes": activity.notes,
+        "is_returning_visitor": (
+            is_returning_visitor
+            if is_returning_visitor is not None
+            else visit_session.is_returning_visitor if visit_session else False
+        ),
+    }
+
+
+@router.get("/visitor-activity")
+def list_visitor_activity(
+    search: Optional[str] = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    activities = (
+        db.query(VisitorActivity)
+        .order_by(VisitorActivity.created_at.desc(), VisitorActivity.visitor_activity_id.desc())
+        .limit(limit)
+        .all()
+    )
+
+    rows = []
+    search_text = search.strip().lower() if search else None
+
+    for activity in activities:
+        visitor = db.get(Visitor, activity.visitor_id) if activity.visitor_id else None
+        visit_session = (
+            db.get(VisitSession, activity.visit_session_id)
+            if activity.visit_session_id
+            else None
+        )
+        previous_activity = previous_activity_for_activity(db, activity)
+        previous_visit_purpose = (
+            previous_activity.visit_purpose or previous_activity.notes or previous_activity.previous_selected_service
+            if previous_activity is not None
+            else None
+        )
+        row = visitor_activity_payload(
+            activity,
+            visitor,
+            visit_session,
+            previous_visit_purpose=previous_visit_purpose,
+            is_returning_visitor=(
+                bool(getattr(visit_session, "is_returning_visitor", False))
+                if visit_session is not None
+                else previous_activity is not None
+            ),
+        )
+
+        if search_text:
+            searchable = " ".join(
+                str(row.get(key) or "")
+                for key in (
+                    "visitor_name",
+                    "visitor_phone",
+                    "visitor_email",
+                    "source",
+                    "previous_visit_purpose",
+                    "visit_purpose",
+                )
+            ).lower()
+            if search_text not in searchable:
+                continue
+
+        rows.append(row)
+
+    return success_response(
+        message="Visitor activity retrieved successfully",
+        data=rows,
+    )
+
+
+@router.get("/returning-visitors")
+def list_returning_visitors(
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    sessions = (
+        db.query(VisitSession)
+        .filter(VisitSession.is_returning_visitor.is_(True))
+        .order_by(VisitSession.check_in_time.desc(), VisitSession.visit_session_id.desc())
+        .limit(limit)
+        .all()
+    )
+
+    rows = []
+    for session in sessions:
+        visitor = db.get(Visitor, session.visitor_id) if session.visitor_id else None
+        rows.append(
+            {
+                "visit_session_id": session.visit_session_id,
+                "visitor_id": session.visitor_id,
+                "visitor_name": visitor.visitor_name if visitor else None,
+                "visitor_phone": visitor.visitor_phone if visitor else None,
+                "visitor_email": visitor.visitor_email if visitor else None,
+                "visitor_type": getattr(visitor, "visitor_type", "visitor") if visitor else None,
+                "company_name": getattr(visitor, "company_name", None) if visitor else None,
+                "company_number": getattr(visitor, "company_number", None) if visitor else None,
+                "check_in_time": session.check_in_time,
+                "previous_visit_id": session.previous_visit_id,
+                "current_selected_service": session.current_selected_service,
+                "visit_purpose": session.visit_purpose,
+                "notes": session.notes,
+            }
+        )
+
+    return success_response(
+        message="Returning visitors retrieved successfully",
+        data=rows,
+    )
+
+
+# ============================================================
+# Live Activity Admin API
+# Read-only endpoints.
+# ============================================================
+
+
+@router.get("/live-activity/metrics")
+def get_live_activity_metrics(db: Session = Depends(get_db)):
+    metrics = db.query(LiveActivityMetric).first()
+
+    if metrics is None:
+        return not_found_response(
+            message="Live activity metrics not found",
+            error_code="LIVE_ACTIVITY_METRICS_NOT_FOUND",
+        )
+
+    data = LiveActivityMetricRead.model_validate(metrics).model_dump()
+
+    return success_response(
+        message="Live activity metrics retrieved successfully",
+        data=data,
+    )
+
+
+@router.get("/live-activity/feed")
+def list_live_activity_feed(
+    limit: int = Query(default=20, ge=1, le=100),
+    category: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    query = db.query(LiveActivityFeed)
+
+    if category is not None:
+        query = query.filter(LiveActivityFeed.category == category)
+
+    feed_items = (
+        query
+        .order_by(LiveActivityFeed.occurred_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    data = [
+        LiveActivityFeedRead.model_validate(item).model_dump()
+        for item in feed_items
+    ]
+
+    return success_response(
+        message="Live activity feed retrieved successfully",
+        data=data,
+    )
