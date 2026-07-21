@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
-from app.models import ActivityFeed, Booking, EcosystemMetric, Event, Sector, Zone
+from app.models import ActivityFeed, Booking, EcosystemMetric, Event, Zone
 
 DUBAI = ZoneInfo("Asia/Dubai")
 
@@ -22,12 +22,30 @@ def schedule_status(schedule_date: date, start: time, end: time, now: datetime |
     return "upcoming"
 
 
+def booking_is_active(booking: Booking, now: datetime | None = None) -> bool:
+    now = now or now_dubai()
+    if booking.booking_type == "office":
+        return booking.booking_start_date <= now.date() <= booking.booking_end_date
+    return schedule_status(booking.booking_date, booking.booking_time_start, booking.booking_time_end, now) == "live"
+
+
+def booking_status(booking: Booking, now: datetime | None = None) -> str:
+    now = now or now_dubai()
+    if booking.booking_type == "office":
+        if booking.booking_end_date < now.date():
+            return "ended"
+        if booking.booking_start_date <= now.date() <= booking.booking_end_date:
+            return "live"
+        return "upcoming"
+    return schedule_status(booking.booking_date, booking.booking_time_start, booking.booking_time_end, now)
+
+
 def zone_status(zone: Zone, now: datetime | None = None) -> str:
     if zone.is_closed:
         return "closed"
     now = now or now_dubai()
     active_event = any(schedule_status(e.event_date, e.event_time_start, e.event_time_end, now) == "live" for e in zone.events)
-    active_booking = any(schedule_status(b.booking_date, b.booking_time_start, b.booking_time_end, now) == "live" for b in zone.bookings)
+    active_booking = any(booking_is_active(b, now) for b in zone.bookings)
     return "occupied" if active_event or active_booking else "available"
 
 

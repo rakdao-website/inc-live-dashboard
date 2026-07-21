@@ -1,14 +1,18 @@
 from contextlib import asynccontextmanager
+import threading
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.admin import admin_login, router as admin_router
 from app.config import settings
 from app.database import Base, SessionLocal, check_database_connection, engine
+from app.face_recognition_service import FaceRecognitionUnavailable, get_face_recognition_service
 from app.routers.kiosk import router as kiosk_router
+from app.routers.kiosk_flow import router as kiosk_flow_router
 from app.schemas import AdminLoginRequest
 from app.seed import seed_sample_data
 
@@ -37,6 +41,15 @@ def error_response(
     }
 
 
+def warm_face_recognition_model() -> None:
+    try:
+        get_face_recognition_service().warm_up()
+    except FaceRecognitionUnavailable as exc:
+        print(f"Face recognition warm-up skipped: {exc}")
+    except Exception as exc:
+        print(f"Face recognition warm-up failed: {exc}")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     if settings.auto_create_tables:
@@ -44,6 +57,7 @@ async def lifespan(_: FastAPI):
     if settings.seed_sample_data:
         with SessionLocal() as db:
             seed_sample_data(db)
+    threading.Thread(target=warm_face_recognition_model, daemon=True).start()
     yield
 
 
@@ -51,6 +65,21 @@ app = FastAPI(
     title=settings.app_name,
     debug=settings.debug,
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+        "http://localhost:3002",
+        "http://127.0.0.1:3002",
+        "http://localhost:3003",
+        "http://127.0.0.1:3003",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -117,4 +146,5 @@ def admin_auth_login(payload: AdminLoginRequest):
 
 
 app.include_router(kiosk_router)
+app.include_router(kiosk_flow_router)
 app.include_router(admin_router)

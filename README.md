@@ -23,7 +23,6 @@ The default development account is username `admin` and password `admin123`.
 - `GET /api/zones` - current Ground Floor map status
 - `GET /api/activity-metrics` - live activity/KPI cards such as occupied zones, active meetings, and today's events
 - `GET /api/ecosystem-metrics` - active companies, active licenses, and top sector
-- `GET /api/sectors` - sector chart data
 - `GET /api/events` - event schedule data with calculated live/upcoming/ended status
 - `GET /api/bookings` - booking schedule data with calculated live/upcoming/ended status
 - `GET /api/activity-feed` - latest live activity feed items

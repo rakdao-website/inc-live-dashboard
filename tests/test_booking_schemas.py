@@ -50,3 +50,27 @@ def test_booking_create_rejects_end_time_before_start_time():
             booking_time_start=time(11, 0),
             booking_time_end=time(10, 0),
         )
+
+
+def test_booking_create_rejects_times_outside_operating_hours():
+    with pytest.raises(ValidationError, match="between 9:00 AM and 5:00 PM"):
+        BookingCreate(
+            zone_id="MR_1",
+            booking_type="meeting",
+            booking_name="Early Meeting",
+            booking_start_date=date(2026, 7, 1),
+            booking_end_date=date(2026, 7, 1),
+            booking_time_start=time(8, 30),
+            booking_time_end=time(9, 30),
+        )
+
+    with pytest.raises(ValidationError, match="between 9:00 AM and 5:00 PM"):
+        BookingCreate(
+            zone_id="MR_1",
+            booking_type="meeting",
+            booking_name="Late Meeting",
+            booking_start_date=date(2026, 7, 1),
+            booking_end_date=date(2026, 7, 1),
+            booking_time_start=time(16, 30),
+            booking_time_end=time(17, 30),
+        )

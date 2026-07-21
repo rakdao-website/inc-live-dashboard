@@ -3,7 +3,7 @@ from datetime import date, time
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import ActivityFeed, Booking, EcosystemMetric, Event, Sector, Zone
+from app.models import ActivityFeed, Booking, EcosystemMetric, Event, Zone
 
 
 def seed_sample_data(db: Session) -> None:
@@ -17,9 +17,7 @@ def seed_sample_data(db: Session) -> None:
     ]
     zones += [(f"OFF_{i:02}", f"Office {i}", "office", True, False) for i in range(1, 20)]
     db.add_all(Zone(zone_id=a, zone_name=b, zone_type=c, is_bookable=d, is_closed=e) for a, b, c, d, e in zones)
-    db.add(EcosystemMetric(snapshot_date=date.today(), active_companies=2001, active_licenses=1202, top_sector="Manufacturing"))
-    sector_names = [("Web3",179),("Artificial Intelligence",99),("Gaming",75),("Manufacturing",483),("Trading",261),("Media",457),("Software",199),("E-commerce",20),("Consulting",171),("Other",57)]
-    db.add_all(Sector(sector_name=name, company_count=count, source_name="Official - Innovation City Documents", display_order=i) for i, (name, count) in enumerate(sector_names, 1))
+    db.add(EcosystemMetric(snapshot_date=date.today(), active_companies=2001, active_licenses=1202))
     today = date.today()
     db.add_all([
         Event(zone_id="EVT_1", event_name="AI Founders Meetup", event_date=today, event_time_start=time(11), event_time_end=time(12,30), event_organizer="Innovation City", event_attendee_count=42),
