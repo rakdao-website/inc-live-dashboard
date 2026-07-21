@@ -136,6 +136,19 @@ class KioskEventRead(BaseModel):
     short_description: str
 
 
+class RoomQuestionRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=300)
+
+
+class RoomQuestionResponse(BaseModel):
+    answer: str
+    source: Literal["llm", "scripted"]
+
+
+class SpeakRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=1000)
+
+
 class VisitSessionRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

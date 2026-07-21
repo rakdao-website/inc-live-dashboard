@@ -15,6 +15,21 @@ class Settings(BaseSettings):
     admin_password: str = "admin123"
     admin_role: str = "super_user"
 
+    # Room Q&A brain. "scripted" needs no key and is the default; set to
+    # "gemini" or "grok" and supply the matching key via .env to enable it.
+    # Falls back to the scripted matcher automatically if the call fails.
+    room_question_provider: str = "scripted"
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-2.5-flash"
+    xai_api_key: str = ""
+    xai_model: str = "grok-3"
+
+    # Server-side text-to-speech (xAI TTS). Off by default; the frontend
+    # falls back to the browser's built-in speech synthesis automatically
+    # when this is disabled or the call fails for any reason.
+    tts_enabled: bool = False
+    xai_tts_voice: str = "eve"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
