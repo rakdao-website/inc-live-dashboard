@@ -1,0 +1,5 @@
+﻿Drop clear front-facing photos of Sara Al Maktoum here.
+Supported: .jpg .jpeg .png .bmp .webp
+Then run:
+  python scripts/import_existing_faces.py --dataset ./dataset
+

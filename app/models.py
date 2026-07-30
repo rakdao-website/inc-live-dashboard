@@ -216,6 +216,109 @@ class FaceProfile(Base):
     )
 
 
+class FaceEmbedding(Base):
+    """One face embedding vector (JSON array of floats) for a visitor.
+
+    This table is the persistent face gallery: recognition loads all rows
+    and matches by cosine similarity, replacing the old embeddings.pkl file.
+    """
+
+    __tablename__ = "face_embeddings"
+
+    face_embedding_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    visitor_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        ForeignKey("visitors.visitor_id"),
+        nullable=True,
+        index=True,
+    )
+    face_identifier: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    embedding: Mapped[str] = mapped_column(Text, nullable=False)
+    source_image: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    model_name: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+        server_default=text("'buffalo_l'"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+
+
+class UnknownFaceCapture(Base):
+    """A face seen at the kiosk/camera that did not match any visitor."""
+
+    __tablename__ = "unknown_face_captures"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'web_searched', 'linked', 'dismissed')"
+        ),
+    )
+
+    capture_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    image_path: Mapped[str] = mapped_column(String(255), nullable=False)
+    embedding: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    best_gallery_score: Mapped[Optional[float]] = mapped_column(nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        server_default=text("'pending'"),
+    )
+    web_search_status: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    linked_visitor_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        ForeignKey("visitors.visitor_id"),
+        nullable=True,
+    )
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+
+    web_matches: Mapped[list["FaceWebMatch"]] = relationship(
+        back_populates="capture",
+        order_by="FaceWebMatch.rank",
+    )
+
+
+class FaceWebMatch(Base):
+    """Top web face-search candidate for an unknown capture (rank 1..N)."""
+
+    __tablename__ = "face_web_matches"
+
+    web_match_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    capture_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("unknown_face_captures.capture_id"),
+        nullable=False,
+        index=True,
+    )
+    rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    score: Mapped[Optional[float]] = mapped_column(nullable=True)
+    thumbnail_base64: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    provider: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+        server_default=text("'facecheck'"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+
+    capture: Mapped[UnknownFaceCapture] = relationship(back_populates="web_matches")
+
+
 class VisitSession(Base):
     __tablename__ = "visit_sessions"
 

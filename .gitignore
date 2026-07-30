@@ -5,6 +5,15 @@ __pycache__/
 *.db
 .pytest_cache/
 
+# Runtime face artifacts (keep dataset/*/PUT_FACE_PHOTOS_HERE.txt)
+data/
+dataset/**/*.jpg
+dataset/**/*.jpeg
+dataset/**/*.png
+dataset/**/*.bmp
+dataset/**/*.webp
+app/embeddings.pkl
+
 .venv/
 venv/
 
