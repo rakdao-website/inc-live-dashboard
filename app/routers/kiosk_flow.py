@@ -204,7 +204,11 @@ def recognize_face(
     if payload.simulate_mobile_number:
         visitor = find_visitor_by_phone(db, payload.simulate_mobile_number)
     else:
-        if not payload.images_base64 and not payload.image_base64:
+        images = list(payload.images_base64 or [])
+        if payload.image_base64:
+            images.append(payload.image_base64)
+
+        if not images:
             return bad_request_response(
                 message="A browser camera image is required for face recognition.",
                 error_code="FACE_IMAGE_REQUIRED",
@@ -212,13 +216,7 @@ def recognize_face(
 
         try:
             recognizer = get_face_recognition_service()
-            match = (
-                recognizer.recognize_images_base64(payload.images_base64)
-                if payload.images_base64
-                else recognizer.recognize_image_base64(payload.image_base64)
-                if payload.image_base64
-                else None
-            )
+            result = recognizer.recognize_images_base64(images)
         except FaceRecognitionUnavailable as exc:
             return JSONResponse(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -241,10 +239,14 @@ def recognize_face(
                 ),
             )
 
-        matched_name = match.name
-        confidence = match.score
-        if match.recognized:
-            visitor = find_visitor_by_face_name(db, match.name)
+        if result.status == "recognized" and result.best_match:
+            matched_name = result.best_match.name
+            confidence = result.best_match.score
+            visitor = find_visitor_by_face_name(db, matched_name)
+        elif result.status == "suggestions":
+            matched_name = None
+            confidence = result.suggestions[0].score if result.suggestions else None
+        # status == "not_registered" or "no_face": matched_name/confidence stay None
 
     data = RecognizeFaceResponse(
         recognized=visitor is not None,
@@ -256,7 +258,6 @@ def recognize_face(
         message="Face recognition completed",
         data=data.model_dump(),
     )
-
 
 @router.post("/room-question")
 async def room_question(

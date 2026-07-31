@@ -1,22 +1,32 @@
 import base64
-import pickle
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
 
 
-DEFAULT_EMBEDDINGS_PATH = Path(__file__).with_name("embeddings.pkl")
 VENDOR_PATH = Path(__file__).with_name("vendor")
-SIMILARITY_THRESHOLD = 0.50
-EARLY_ACCEPT_SIMILARITY = 0.72
+
+# Similarity thresholds
+HIGH_CONFIDENCE_THRESHOLD = 0.70   # >= this: recognized automatically
+LOW_CONFIDENCE_THRESHOLD = 0.50    # 0.50-0.69: show as suggestions
+# < 0.50: not registered, ask to register
+
 MODEL_NAME = "buffalo_l"
 PROVIDERS = ["CPUExecutionProvider"]
 DETECTION_SIZE = (320, 320)
 CAMERA_INDEX = 0
+
+QDRANT_HOST = "localhost"
+QDRANT_PORT = 6333
+QDRANT_COLLECTION = "face_embeddings"
+EMBEDDING_SIZE = 512
 
 
 class FaceRecognitionUnavailable(RuntimeError):
@@ -30,27 +40,30 @@ class FaceMatch:
     recognized: bool
 
 
+@dataclass(frozen=True)
+class FaceRecognitionResult:
+    status: str  # "recognized" | "suggestions" | "not_registered" | "no_face"
+    best_match: FaceMatch | None
+    suggestions: list[FaceMatch]
+    message: str
+
+
 class FaceDatabase:
     def __init__(
         self,
-        path: Path | str = DEFAULT_EMBEDDINGS_PATH,
-        data: dict[str, list[Any]] | None = None,
-        threshold: float = SIMILARITY_THRESHOLD,
+        host: str = QDRANT_HOST,
+        port: int = QDRANT_PORT,
     ):
-        self.path = Path(path)
-        self.threshold = threshold
-        self.data = data if data is not None else self._load()
+        self.client = QdrantClient(host=host, port=port)
+        self._ensure_collection()
 
-    def _load(self) -> dict[str, list[Any]]:
-        if not self.path.exists():
-            return {}
-        with self.path.open("rb") as file:
-            return pickle.load(file)
-
-    def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("wb") as file:
-            pickle.dump(self.data, file)
+    def _ensure_collection(self) -> None:
+        collections = [c.name for c in self.client.get_collections().collections]
+        if QDRANT_COLLECTION not in collections:
+            self.client.create_collection(
+                collection_name=QDRANT_COLLECTION,
+                vectors_config=VectorParams(size=EMBEDDING_SIZE, distance=Distance.COSINE),
+            )
 
     @staticmethod
     def normalize(vector: Any) -> np.ndarray:
@@ -58,30 +71,39 @@ class FaceDatabase:
         norm = np.linalg.norm(normalized)
         return normalized if norm == 0 else normalized / norm
 
-    def match(self, embedding: Any) -> FaceMatch:
-        if not self.data:
-            return FaceMatch(name=None, score=-1.0, recognized=False)
-
+    def match(self, embedding: Any, top_k: int = 3) -> list[FaceMatch]:
         query = self.normalize(embedding)
-        best_name: str | None = None
-        best_score = -1.0
+        results = self.client.query_points(
+            collection_name=QDRANT_COLLECTION,
+            query=query.tolist(),
+            limit=top_k,
+        ).points
 
-        for name, embeddings in self.data.items():
-            for stored_embedding in embeddings:
-                score = float(np.dot(query, self.normalize(stored_embedding)))
-                if score > best_score:
-                    best_name = name
-                    best_score = score
-
-        return FaceMatch(
-            name=best_name,
-            score=best_score,
-            recognized=best_name is not None and best_score >= self.threshold,
-        )
+        return [
+            FaceMatch(
+                name=result.payload.get("name"),
+                score=float(result.score),
+                recognized=float(result.score) >= HIGH_CONFIDENCE_THRESHOLD,
+            )
+            for result in results
+        ]
 
     def replace_person(self, name: str, embeddings: list[Any]) -> None:
-        self.data[name] = [self.normalize(embedding) for embedding in embeddings]
-        self.save()
+        self.client.delete(
+            collection_name=QDRANT_COLLECTION,
+            points_selector=Filter(
+                must=[FieldCondition(key="name", match=MatchValue(value=name))]
+            ),
+        )
+        points = [
+            PointStruct(
+                id=abs(hash(f"{name}_{i}")) % (2**63),
+                vector=self.normalize(embedding).tolist(),
+                payload={"name": name},
+            )
+            for i, embedding in enumerate(embeddings)
+        ]
+        self.client.upsert(collection_name=QDRANT_COLLECTION, points=points)
 
 
 class FaceRecognitionService:
@@ -107,41 +129,17 @@ class FaceRecognitionService:
                     "Face recognition dependencies are not installed. Run pip install -r requirements.txt in the backend environment."
                 ) from exc
 
-            app = FaceAnalysis(name=MODEL_NAME, providers=PROVIDERS)
+            app = FaceAnalysis(
+                name=MODEL_NAME,
+                providers=PROVIDERS,
+                allowed_modules=["detection", "recognition"],
+            )
             app.prepare(ctx_id=0, det_size=DETECTION_SIZE)
             self._app = app
             return app
 
     def warm_up(self) -> None:
         self._face_app()
-
-    def recognize_frame(self, frame: Any) -> FaceMatch:
-        faces = self._face_app().get(frame)
-        if not faces:
-            return FaceMatch(name=None, score=-1.0, recognized=False)
-
-        face = max(
-            faces,
-            key=lambda item: (item.bbox[2] - item.bbox[0]) * (item.bbox[3] - item.bbox[1]),
-        )
-        return self.database.match(face.embedding)
-
-    def recognize_image_base64(self, image_base64: str) -> FaceMatch:
-        frame = self.decode_image_base64(image_base64)
-        return self.recognize_frame(frame)
-
-    def recognize_images_base64(self, images_base64: list[str]) -> FaceMatch:
-        if not images_base64:
-            raise ValueError("At least one face image is required for recognition.")
-
-        best_match = FaceMatch(name=None, score=-1.0, recognized=False)
-        for image_base64 in images_base64:
-            match = self.recognize_image_base64(image_base64)
-            if match.score > best_match.score:
-                best_match = match
-            if match.recognized and match.score >= EARLY_ACCEPT_SIMILARITY:
-                break
-        return best_match
 
     @staticmethod
     def decode_image_base64(image_base64: str):
@@ -160,16 +158,97 @@ class FaceRecognitionService:
             raise ValueError("Could not decode face image.")
         return frame
 
+    def _embedding_from_image_safe(self, image_base64: str) -> np.ndarray | None:
+        """Returns the normalized embedding for the largest face, or None if no face found."""
+        try:
+            frame = self.decode_image_base64(image_base64)
+            faces = self._face_app().get(frame)
+            if not faces:
+                return None
+            face = max(
+                faces,
+                key=lambda item: (item.bbox[2] - item.bbox[0]) * (item.bbox[3] - item.bbox[1]),
+            )
+            return self.database.normalize(face.embedding)
+        except Exception:
+            return None
+
     def embedding_from_image_base64(self, image_base64: str) -> np.ndarray:
-        frame = self.decode_image_base64(image_base64)
+        embedding = self._embedding_from_image_safe(image_base64)
+        if embedding is None:
+            raise ValueError("No face was detected in one of the enrollment images.")
+        return embedding
+
+    def recognize_frame(self, frame: Any) -> FaceMatch:
         faces = self._face_app().get(frame)
         if not faces:
-            raise ValueError("No face was detected in one of the enrollment images.")
+            return FaceMatch(name=None, score=-1.0, recognized=False)
+
         face = max(
             faces,
             key=lambda item: (item.bbox[2] - item.bbox[0]) * (item.bbox[3] - item.bbox[1]),
         )
-        return self.database.normalize(face.embedding)
+        matches = self.database.match(face.embedding, top_k=1)
+        return matches[0] if matches else FaceMatch(name=None, score=-1.0, recognized=False)
+
+    def recognize_image_base64(self, image_base64: str) -> FaceMatch:
+        frame = self.decode_image_base64(image_base64)
+        return self.recognize_frame(frame)
+
+    def recognize_images_base64(self, images_base64: list[str]) -> FaceRecognitionResult:
+        """
+        Recognizes a person from up to several photos taken at once (higher accuracy
+        via averaging embeddings). Applies three-tier confidence:
+          - score >= 0.70            -> recognized automatically
+          - 0.50 <= score < 0.70     -> return top matches as suggestions
+          - score < 0.50             -> not_registered
+        """
+        if not images_base64:
+            raise ValueError("At least one face image is required for recognition.")
+
+        embeddings: list[np.ndarray] = []
+        with ThreadPoolExecutor(max_workers=min(len(images_base64), 4)) as executor:
+            futures = [executor.submit(self._embedding_from_image_safe, img) for img in images_base64]
+            for future in as_completed(futures):
+                embedding = future.result()
+                if embedding is not None:
+                    embeddings.append(embedding)
+
+        if not embeddings:
+            return FaceRecognitionResult(
+                status="no_face",
+                best_match=None,
+                suggestions=[],
+                message="No face was detected in any of the provided images.",
+            )
+
+        average_embedding = self.database.normalize(np.mean(embeddings, axis=0))
+        matches = self.database.match(average_embedding, top_k=3)
+        best = matches[0] if matches else None
+
+        if best is not None and best.score >= HIGH_CONFIDENCE_THRESHOLD:
+            return FaceRecognitionResult(
+                status="recognized",
+                best_match=best,
+                suggestions=[],
+                message=f"Welcome back, {best.name}!",
+            )
+
+        candidates = [match for match in matches if match.score >= LOW_CONFIDENCE_THRESHOLD]
+        if candidates:
+            return FaceRecognitionResult(
+                status="suggestions",
+                best_match=None,
+                suggestions=candidates,
+                message="We found some possible matches. Please confirm which one is you.",
+            )
+
+        return FaceRecognitionResult(
+            status="not_registered",
+            best_match=None,
+            suggestions=[],
+            message="We don't recognize you yet. Please register.",
+        )
 
     def enroll_images(self, name: str, images_base64: list[str]) -> int:
         embeddings = [
