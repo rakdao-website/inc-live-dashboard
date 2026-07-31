@@ -134,13 +134,13 @@ def detect_face(payload: DetectFaceRequest, db: Session = Depends(get_db)):
         service = get_face_recognition_service()
         best_embedding = None
         best_bytes = None
-        best_score = -1.0
+        best_score = None
         best_match = None
         for image_base64 in images:
             image_bytes = _decode_base64(image_base64)
             embedding = service.embedding_from_image_base64(image_base64)
             match = face_gallery.match_embedding(db, embedding)
-            if match.score > best_score:
+            if best_score is None or match.score > best_score:
                 best_score = match.score
                 best_embedding = embedding
                 best_bytes = image_bytes
@@ -170,7 +170,7 @@ def detect_face(payload: DetectFaceRequest, db: Session = Depends(get_db)):
     capture = UnknownFaceCapture(
         image_path=str(image_path),
         embedding=face_gallery.serialize_embedding(best_embedding),
-        best_gallery_score=best_score if best_score >= 0 else None,
+        best_gallery_score=best_score if best_score is not None and best_score >= 0 else None,
         status="pending",
     )
     db.add(capture)
@@ -185,7 +185,7 @@ def detect_face(payload: DetectFaceRequest, db: Session = Depends(get_db)):
         "Face not recognized; captured for review",
         DetectFaceResponse(
             recognized=False,
-            confidence=best_score if best_score >= 0 else None,
+            confidence=best_score if best_score is not None and best_score >= 0 else None,
             capture=CaptureRead.model_validate(capture),
         ).model_dump(mode="json"),
     )
