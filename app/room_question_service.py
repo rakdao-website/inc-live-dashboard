@@ -11,11 +11,13 @@ rather than a made-up specific.
 """
 
 import re
+from datetime import date
 
 import httpx
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.models import Booking
 from app.services import zones_with_status
 
 LLM_TIMEOUT_SECONDS = 12
@@ -97,6 +99,15 @@ _NUMBER_WORDS = {
     "fifteen": "15", "sixteen": "16", "seventeen": "17", "eighteen": "18",
     "nineteen": "19", "twenty": "20",
 }
+
+_BOOKING_REQUEST_RE = re.compile(
+    r"\b(book|booking|reserve|reservation|schedule|appointment|help me book|help with booking|book a|book me|reserve a)\b",
+    re.IGNORECASE,
+)
+_BOOKING_STATUS_RE = re.compile(
+    r"\b(my booking|my bookings|current booking|upcoming booking|upcoming bookings|existing booking|existing bookings|booking status|bookings today|my reservation|my reservations)\b",
+    re.IGNORECASE,
+)
 
 
 def _normalize(text: str) -> str:
@@ -198,10 +209,45 @@ def _directory_text(rooms: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def scripted_answer(question: str, rooms: list[dict]) -> str:
+def _format_booking_summary(db: Session, visitor_id: int) -> str:
+    today = date.today()
+    bookings = (
+        db.query(Booking)
+        .filter(Booking.visitor_id == visitor_id, Booking.booking_date >= today)
+        .order_by(Booking.booking_date, Booking.booking_time_start)
+        .all()
+    )
+
+    if not bookings:
+        return "You don't have any upcoming bookings yet."
+
+    lines = [f"You have {len(bookings)} upcoming booking(s):"]
+    for booking in bookings:
+        room_name = getattr(booking.zone, "zone_name", None) or booking.booking_name
+        lines.append(
+            f"- {room_name} on {booking.booking_date.isoformat()} at {booking.booking_time_start.strftime('%H:%M')}"
+        )
+    return " ".join(lines)
+
+
+def _booking_request_response(visitor_id: int | None) -> str:
+    if visitor_id is None:
+        return "To book a room, please log in or register first so I can help with your booking."
+    return "I can help you book a room. Tell me the room, date, and time, or use the booking screen to fill in the details."
+
+
+def scripted_answer(question: str, rooms: list[dict], visitor_id: int | None = None) -> str:
     q = _normalize(question)
     if not q:
         return "Could you say that again? I didn't catch a question."
+
+    # Note: booking-status questions ("what are my bookings") are already
+    # intercepted in answer_room_question() before it ever falls back to
+    # this function, so there's no db session available here to look them
+    # up - don't add that check back in this function without also passing
+    # db through as a parameter.
+    if _BOOKING_REQUEST_RE.search(question):
+        return _booking_request_response(visitor_id)
 
     room = find_room_in_question(question, rooms)
     if room:
@@ -230,8 +276,8 @@ def _prompt(question: str, rooms: list[dict]) -> str:
         "list, answer the visitor's question - which may ask about anything "
         "(capacity, features, floor, availability, general description), not "
         "just whether a room is free - in 1-3 short sentences. If nothing "
-        f"matches, say so.\n\nRooms:\n{_directory_text(rooms)}\n\nQuestion: {question}"
-        "make your answer concise, friendly, and conversational, with no markdown, lists."
+        f"matches, say so.\n\nRooms:\n{_directory_text(rooms)}\n\nQuestion: {question}\n\n"
+        "Make your answer concise, friendly, and conversational, with no markdown or lists."
     )
 
 
@@ -263,9 +309,15 @@ async def _ask_grok(question: str, rooms: list[dict]) -> str:
     return data["choices"][0]["message"]["content"].strip()
 
 
-async def answer_room_question(db: Session, question: str) -> tuple[str, str]:
+async def answer_room_question(db: Session, question: str, visitor_id: int | None = None) -> tuple[str, str]:
     """Returns (answer, source) where source is 'llm' or 'scripted'."""
     rooms = build_room_directory(db)
+
+    if _BOOKING_STATUS_RE.search(question) and visitor_id is not None:
+        return _format_booking_summary(db, visitor_id), "scripted"
+
+    if _BOOKING_REQUEST_RE.search(question):
+        return _booking_request_response(visitor_id), "scripted"
 
     try:
         if settings.room_question_provider == "gemini" and settings.gemini_api_key:
@@ -275,4 +327,4 @@ async def answer_room_question(db: Session, question: str) -> tuple[str, str]:
     except Exception as exc:  # noqa: BLE001 - any provider failure falls back
         print(f"Room-question LLM call failed, falling back to scripted matcher: {exc}")
 
-    return scripted_answer(question, rooms), "scripted"
+    return scripted_answer(question, rooms, visitor_id), "scripted"

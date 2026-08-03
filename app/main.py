@@ -15,7 +15,8 @@ from app.routers.kiosk import router as kiosk_router
 from app.routers.kiosk_flow import router as kiosk_flow_router
 from app.schemas import AdminLoginRequest
 from app.seed import seed_sample_data
-
+from app.voice_agent.initiate import router as initiate_router
+from app.voice_agent.converse import router as converse_router
 
 def success_response(
     message: str = "Request completed successfully",
@@ -148,3 +149,6 @@ def admin_auth_login(payload: AdminLoginRequest):
 app.include_router(kiosk_router)
 app.include_router(kiosk_flow_router)
 app.include_router(admin_router)
+
+app.include_router(initiate_router, prefix="/voice-agent")
+app.include_router(converse_router, prefix="/voice-agent")
