@@ -7,9 +7,10 @@ from app.models import Booking, Event, VisitSession, Visitor, VisitorActivity
 
 
 SERVICE_DEFAULTS = {
-    "meeting_room": ("meeting", "MR_1", "Meeting Room 1"),
+    "meeting_room 1": ("meeting", "MR_1", "Meeting Room 1"),
+    "meeting_room 1": ("meeting", "MR_1", "Meeting Room 1"),
     "podcast_studio": ("studio", "POD_1", "Podcast Studio"),
-    "tiktok_studio": ("studio", "TTS_1", "TikTok Studio"),
+    "tiktok_studio": ("studio", "TTS_1", "TikTok Studio")
 }
 
 

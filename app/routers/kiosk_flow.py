@@ -3,7 +3,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query, status
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy import func
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -24,9 +24,17 @@ from app.kiosk_flow_schemas import (
     ProfileLookupRequest,
     RecognizeFaceRequest,
     RecognizeFaceResponse,
+    RoomQuestionRequest,
+    RoomQuestionResponse,
+    SpeakRequest,
+    ParseTranscriptRequest,
     VisitSessionCreate,
     VisitSessionRead,
 )
+from app.room_question_service import answer_room_question
+from app.voice_agent.tts_service import TtsUnavailable, synthesize_speech
+from app.booking_intent_service import parse_booking_intent
+from app.registration_intent_service import parse_visitor_intent
 from app.kiosk_flow_services import (
     calculate_end_time,
     create_activity,
@@ -251,6 +259,47 @@ def recognize_face(
         message="Face recognition completed",
         data=data.model_dump(),
     )
+
+
+@router.post("/room-question")
+async def room_question(
+    payload: RoomQuestionRequest,
+    db: Session = Depends(get_db),
+):
+    answer, source = await answer_room_question(db, payload.question)
+    return success_response(
+        message="Room question answered",
+        data=RoomQuestionResponse(answer=answer, source=source).model_dump(),
+    )
+
+
+@router.post("/speak")
+async def speak(payload: SpeakRequest):
+    """
+    Returns raw MP3 bytes (not the usual JSON envelope, since this is audio).
+    A non-200 here is expected and harmless when TTS isn't configured - the
+    frontend catches it and falls back to the browser's own speech synthesis.
+    """
+    try:
+        audio_bytes, content_type = await synthesize_speech(payload.text)
+    except TtsUnavailable as exc:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content=error_response(str(exc), "TTS_UNAVAILABLE"),
+        )
+    return Response(content=audio_bytes, media_type=content_type)
+
+
+@router.post("/parse-booking-intent")
+async def parse_booking_intent_route(payload: ParseTranscriptRequest, db: Session = Depends(get_db)):
+    result = await parse_booking_intent(db, payload.transcript, service_type=payload.service_type)
+    return success_response(message="Booking intent parsed", data=result.to_dict())
+
+
+@router.post("/parse-registration-intent")
+async def parse_registration_intent_route(payload: ParseTranscriptRequest):
+    result = await parse_visitor_intent(payload.transcript)
+    return success_response(message="Registration intent parsed", data=result.to_dict())
 
 
 @router.post("/profile-lookup")
