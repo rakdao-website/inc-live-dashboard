@@ -27,77 +27,45 @@ from app.config import settings
 
 TTS_TIMEOUT_SECONDS = 15
 
-_SAMPLE_RATE_RE = re.compile(r"rate=(\d+)")
-
-
 class TtsUnavailable(RuntimeError):
     """Raised when TTS is disabled, unconfigured, or the provider call fails."""
 
+async def _synthesize_openroute(text: str):
+    if not settings.openrouter_api_key:
+        raise TtsUnavailable("OPENROUTER_API_KEY is not configured on the server.")
 
-def _pcm_to_wav(pcm_data: bytes, sample_rate: int, channels: int = 1, bits_per_sample: int = 16) -> bytes:
-    byte_rate = sample_rate * channels * bits_per_sample // 8
-    block_align = channels * bits_per_sample // 8
-    header = struct.pack(
-        "<4sI4s4sIHHIIHH4sI",
-        b"RIFF", 36 + len(pcm_data), b"WAVE",
-        b"fmt ", 16, 1, channels, sample_rate, byte_rate, block_align, bits_per_sample,
-        b"data", len(pcm_data),
-    )
-    return header + pcm_data
+    url = "https://openrouter.ai/api/v1/audio/speech"
+    headers = {
+        "Authorization": f"Bearer {settings.openrouter_api_key}",
+        "Content-Type": "application/json",
+    }
 
-
-async def _synthesize_gemini(text: str) -> tuple[bytes, str]:
-    if not settings.gemini_api_key:
-        raise TtsUnavailable("GEMINI_API_KEY is not configured on the server.")
-
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{settings.gemini_tts_model}:generateContent?key={settings.gemini_api_key}"
-    )
-    body = {
-        "contents": [{"parts": [{"text": text}]}],
-        "generationConfig": {
-            "responseModalities": ["AUDIO"],
-            "speechConfig": {
-                "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": settings.gemini_tts_voice}}
-            },
-        },
+    payload = {
+        "model": settings.openrouter_tts_model,
+        "input": text,
+        "voice": settings.openrouter_tts_voice,
+        "response_format": "mp3",  # or "wav" – MP3 works well with browsers
     }
 
     async with httpx.AsyncClient(timeout=TTS_TIMEOUT_SECONDS) as client:
-        response = await client.post(url, json=body)
-
+        response = await client.post(url, json=payload, headers=headers)
     if response.status_code != 200:
-        raise TtsUnavailable(f"Gemini TTS request failed with status {response.status_code}: {response.text}")
+        raise TtsUnavailable(
+            f"OpenRouter TTS failed with status {response.status_code}: {response.text}"
+        )
 
-    data = response.json()
-    try:
-        part = data["candidates"][0]["content"]["parts"][0]["inlineData"]
-        audio_b64 = part["data"]
-        mime_type = part.get("mimeType", "")
-    except (KeyError, IndexError) as exc:
-        raise TtsUnavailable(f"Gemini TTS returned an unexpected response shape: {data}") from exc
-
-    pcm_bytes = base64.b64decode(audio_b64)
-
-    rate_match = _SAMPLE_RATE_RE.search(mime_type)
-    if not rate_match:
-        raise TtsUnavailable(f"Could not determine sample rate from Gemini response mimeType: {mime_type!r}")
-    sample_rate = int(rate_match.group(1))
-
-    return _pcm_to_wav(pcm_bytes, sample_rate=sample_rate), "audio/wav"
-
+    return response.content, "audio/mpeg"
 
 async def synthesize_speech(text: str) -> tuple[bytes, str]:
     """Returns (audio_bytes, content_type) - WAV for Gemini."""
     if not settings.tts_enabled:
         raise TtsUnavailable("Server-side text-to-speech is not enabled.")
 
-    if settings.tts_provider == "gemini":
-        return await _synthesize_gemini(text)
+    if settings.tts_provider == "openrouter":
+        return await _synthesize_openroute(text)
 
     raise TtsUnavailable(
-        f"Unrecognized tts_provider {settings.tts_provider!r} - only 'gemini' is currently "
-        "supported by this file. Set TTS_PROVIDER=gemini in .env, or reintroduce the xAI "
+        f"Unrecognized tts_provider {settings.tts_provider!r} - only 'openrouter' is currently "
+        "supported by this file. Set TTS_PROVIDER=openrouter in .env, or reintroduce the xAI "
         "branch if that provider is still needed."
     )
