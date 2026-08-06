@@ -126,7 +126,8 @@ async def converse(request: ConverseRequest):
     if not session:
         raise HTTPException(status_code=404, detail="Invalid or expired session")
 
-    #transcribe audio if provided
+    # 2. Transcribe audio if provided
+    transcript = None
     if request.audio:
         try:
             audio_bytes = base64.b64decode(request.audio)
@@ -138,13 +139,15 @@ async def converse(request: ConverseRequest):
         except Exception as e:
             log_error(f"Transcription failed: {e}")
             reply_text = "I couldn't understand the audio. Please try again."
+            # Generate TTS for error
             try:
                 audio_bytes, content_type = await synthesize_speech(reply_text)
                 audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
             except TtsUnavailable:
                 audio_b64 = None
                 content_type = None
-            return{"session_id": request.session_id,
+            return {
+                "session_id": request.session_id,
                 "reply_text": reply_text,
                 "reply_audio": audio_b64,
                 "audio_content_type": content_type,
@@ -165,19 +168,23 @@ async def converse(request: ConverseRequest):
         except TtsUnavailable:
             audio_b64 = None
             content_type = None
-        return {"session_id": request.session_id,
+        return {
+            "session_id": request.session_id,
             "reply_text": reply_text,
             "reply_audio": audio_b64,
             "audio_content_type": content_type,
             "session_ended": False,
             "registered": session.get("registered", False),
             "extracted": None,
-            "step": "waiting_input"}
+            "step": "waiting_input",
+        }
 
+    # 3. Get LLM response
     llm_data = await get_next_response(transcript, session)
     extracted = llm_data.get("extracted", {})
+    session.setdefault("collected", {})
     for key, value in extracted.items():
-        if value and key  in ["name", "email", "phone", "visitor_type"]:
+        if value and key in ["name", "email", "phone", "visitor_type"]:
             session[key] = value
             session["collected"][key] = value
 
@@ -185,29 +192,33 @@ async def converse(request: ConverseRequest):
     session["missing"] = missing
 
     action = llm_data.get("action", "retry")
-    reply_text = llm_data.get("reply", "processing...")
+    reply_text = llm_data.get("reply", "Processing...")
 
+    # 4. Handle login/register if not already registered
+    # Login only needs a name + phone to look someone up. Registration also
+    # only needs name + phone - email is a nice-to-have (used if it was
+    # already picked up during the greeting) but never blocks either flow.
     if action in ("login", "register") and not session.get("registered"):
-        required_fields = ["name", "email", "phone", "visitor_type"]
+        required_fields = ["name", "phone"]
         if all(session.get(field) for field in required_fields):
             phone_normalized = normalize_phone_(session["phone"])
             visitor = None
 
             try:
                 if action == "login":
-                # Try profile lookup via API
+                    # Try profile lookup via API
                     async with httpx.AsyncClient() as client:
                         resp = await client.post(
-                        "http://localhost:8000/api/kiosk/profile-lookup",
-                        json={
-                            "full_name": session["name"],
-                            "mobile_number": phone_normalized,
-                        }
-                    )
+                            "http://localhost:8000/api/kiosk/profile-lookup",
+                            json={
+                                "full_name": session["name"],
+                                "mobile_number": phone_normalized,
+                            }
+                        )
                         if resp.status_code == 200:
                             visitor = resp.json().get("data")
                         else:
-                        # Fallback to direct DB search by phone
+                            # Fallback to direct DB search by phone
                             visitor = await find_visitor_by_phone(phone_normalized)
 
                     if visitor:
@@ -215,30 +226,31 @@ async def converse(request: ConverseRequest):
                         session["registered"] = True
                         reply_text = f"Welcome back, {visitor['visitor_name']}! You are logged in. How can I help you today?"
                     else:
-                    # Not found – fallback to registration
+                        # Not found – fallback to registration
                         reply_text = "I couldn't find your profile. Let's try registering you instead."
                         action = "register"
-                    # Continue to registration (fall through)
+                        # Continue to registration block below (fall through)
 
                 if action == "register":
-                # Try to create new visitor
+                    # Try to create new visitor. Email is optional here -
+                    # use whatever's already been collected (may be None).
                     async with httpx.AsyncClient() as client:
                         resp = await client.post(
-                        "http://localhost:8000/api/kiosk/profiles",
-                        json={
-                            "full_name": session["name"],
-                            "email": session["email"],
-                            "mobile_number": phone_normalized,
-                            "visitor_type": session["visitor_type"],
-                        }
-                    )
+                            "http://localhost:8000/api/kiosk/profiles",
+                            json={
+                                "full_name": session["name"],
+                                "email": session.get("email"),
+                                "mobile_number": phone_normalized,
+                                "visitor_type": session.get("visitor_type", "visitor"),
+                            }
+                        )
                         if resp.status_code == 201:
                             visitor = resp.json().get("data")
                             session["visitor_id"] = visitor["visitor_id"]
                             session["registered"] = True
                             reply_text = f"Thank you, {session['name']}! You are registered. How can I help you today?"
                         elif resp.status_code == 409:
-                        # Conflict – try to find existing visitor by phone
+                            # Conflict – try to find existing visitor by phone
                             visitor = await find_visitor_by_phone(phone_normalized)
                             if visitor:
                                 session["visitor_id"] = visitor["visitor_id"]
@@ -253,17 +265,18 @@ async def converse(request: ConverseRequest):
                 reply_text = "I had trouble processing that. Please try again."
         else:
             missing_fields = [field for field in required_fields if not session.get(field)]
-            reply_text = f"I still need: {', '.join(missing_fields)}. Could you provide them?"
-    # If login or register, call internal APIs (only if not already registered)
-            try:
-                audio_bytes, content_type = await synthesize_speech(reply_text)
-                audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-            except TtsUnavailable:
-                audio_b64 = None
-                content_type = None
+            reply_text = f"I still need your {' and '.join(missing_fields)} to continue."
 
-    # 8. Return response
-        return {
+    # 5. Generate TTS for the reply
+    try:
+        audio_bytes, content_type = await synthesize_speech(reply_text)
+        audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+    except TtsUnavailable:
+        audio_b64 = None
+        content_type = None
+
+    # 6. Return response
+    return {
         "session_id": request.session_id,
         "reply_text": reply_text,
         "reply_audio": audio_b64,
@@ -273,4 +286,3 @@ async def converse(request: ConverseRequest):
         "extracted": {k: session[k] for k in ["name", "email", "phone", "visitor_type"] if session.get(k)},
         "step": action,
     }
-

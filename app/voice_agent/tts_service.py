@@ -23,38 +23,82 @@ import struct
 import httpx
 
 from app.config import settings
-
+import struct
+import wave
+import io
 
 TTS_TIMEOUT_SECONDS = 15
 
 class TtsUnavailable(RuntimeError):
     """Raised when TTS is disabled, unconfigured, or the provider call fails."""
 
-async def _synthesize_openroute(text: str):
+
+def _pcm_to_wav(pcm_data: bytes, sample_rate: int = 24000, channels: int = 1, bits_per_sample: int = 16) -> bytes:
+    """Convert raw PCM data to WAV format."""
+    byte_rate = sample_rate * channels * bits_per_sample // 8
+    block_align = channels * bits_per_sample // 8
+    header = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        36 + len(pcm_data),
+        b"WAVE",
+        b"fmt ",
+        16,
+        1,  # PCM
+        channels,
+        sample_rate,
+        byte_rate,
+        block_align,
+        bits_per_sample,
+        b"data",
+        len(pcm_data),
+    )
+    return header + pcm_data
+
+async def _synthesize_openrouter(text: str) -> tuple[bytes, str]:
     if not settings.openrouter_api_key:
-        raise TtsUnavailable("OPENROUTER_API_KEY is not configured on the server.")
+        raise TtsUnavailable("OPENROUTER_API_KEY is not configured")
 
     url = "https://openrouter.ai/api/v1/audio/speech"
     headers = {
         "Authorization": f"Bearer {settings.openrouter_api_key}",
         "Content-Type": "application/json",
     }
+    
+    # Determine response_format based on model
+    model = settings.openrouter_tts_model
+    if "gemini" in model.lower():
+        response_format = "pcm"  # Gemini requires PCM
+    else:
+        response_format = "mp3"  # Others support MP3
 
     payload = {
-        "model": settings.openrouter_tts_model,
+        "model": model,
         "input": text,
         "voice": settings.openrouter_tts_voice,
-        "response_format": "mp3",  # or "wav" – MP3 works well with browsers
+        "response_format": response_format,
     }
 
     async with httpx.AsyncClient(timeout=TTS_TIMEOUT_SECONDS) as client:
         response = await client.post(url, json=payload, headers=headers)
-    if response.status_code != 200:
-        raise TtsUnavailable(
-            f"OpenRouter TTS failed with status {response.status_code}: {response.text}"
-        )
 
-    return response.content, "audio/mpeg"
+    if response.status_code != 200:
+        try:
+            error_data = response.json()
+            error_msg = error_data.get("error", {}).get("message", response.text)
+        except:
+            error_msg = response.text
+        raise TtsUnavailable(f"OpenRouter TTS failed: {response.status_code} - {error_msg}")
+
+    content = response.content
+
+    if response_format == "pcm":
+        # Gemini returns PCM raw audio; convert to WAV
+        wav_bytes = _pcm_to_wav(content, sample_rate=24000)  # Gemini uses 24kHz
+        return wav_bytes, "audio/wav"
+
+    return content, "audio/mpeg"
+
 
 async def synthesize_speech(text: str) -> tuple[bytes, str]:
     """Returns (audio_bytes, content_type) - WAV for Gemini."""
@@ -62,7 +106,7 @@ async def synthesize_speech(text: str) -> tuple[bytes, str]:
         raise TtsUnavailable("Server-side text-to-speech is not enabled.")
 
     if settings.tts_provider == "openrouter":
-        return await _synthesize_openroute(text)
+        return await _synthesize_openrouter(text)
 
     raise TtsUnavailable(
         f"Unrecognized tts_provider {settings.tts_provider!r} - only 'openrouter' is currently "
