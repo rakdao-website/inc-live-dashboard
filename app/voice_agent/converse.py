@@ -14,6 +14,7 @@ from app.booking_intent_service import parse_booking_intent
 from app.database import SessionLocal
 import uuid
 import httpx
+import re
 
 
 
@@ -26,6 +27,16 @@ class ConverseRequest(BaseModel):
     audio: str = None
     message: str = None
     mime_type: str = "audio/wav"
+    # Set by the frontend once a visitor is already logged in/registered
+    # (e.g. reopening the assistant on a booking or other page), so the
+    # agent doesn't repeat the greeting/login/registration questions.
+    visitor_id: int = None
+    visitor_name: str = None
+    visitor_type: str = None
+    # Which booking page the visitor is on, if any (meeting_room /
+    # podcast_studio / tiktok_studio) - lets booking intent default the
+    # room when they don't name one explicitly.
+    service_type: str = None
 
 # Additional models at the top
 class RegisterRequest(BaseModel):
@@ -126,6 +137,32 @@ async def converse(request: ConverseRequest):
     if not session:
         raise HTTPException(status_code=404, detail="Invalid or expired session")
 
+    # 1b. If the frontend already knows who this visitor is (e.g. the voice
+    # assistant was reopened on a different page after they already logged
+    # in / registered), mark the session registered right away so the agent
+    # skips straight to Q&A instead of re-running the greeting/login flow.
+    if request.visitor_id and not session.get("registered"):
+        session.setdefault("collected", {})
+        session["visitor_id"] = request.visitor_id
+        session["registered"] = True
+        if request.visitor_name:
+            session["name"] = request.visitor_name
+            session["collected"]["name"] = request.visitor_name
+        if request.visitor_type:
+            session["visitor_type"] = request.visitor_type
+            session["collected"]["visitor_type"] = request.visitor_type
+
+    if request.service_type:
+        session["service_type"] = request.service_type
+
+    # Snapshot registration state *after* the pre-authentication shortcut
+    # above but *before* this turn's login/register handling runs. This is
+    # what lets us tell "was already registered coming into this turn"
+    # (an already-known visitor greeted on a new page) apart from "this
+    # turn is the one that just completed login/registration" - only the
+    # latter should tell the frontend to wrap up and hand off.
+    was_registered_before_this_turn = session.get("registered", False)
+
     # 2. Transcribe audio if provided
     transcript = None
     if request.audio:
@@ -153,6 +190,7 @@ async def converse(request: ConverseRequest):
                 "audio_content_type": content_type,
                 "session_ended": False,
                 "registered": session.get("registered", False),
+                "just_registered": False,
                 "extracted": None,
                 "step": "error",
             }
@@ -175,6 +213,7 @@ async def converse(request: ConverseRequest):
             "audio_content_type": content_type,
             "session_ended": False,
             "registered": session.get("registered", False),
+            "just_registered": False,
             "extracted": None,
             "step": "waiting_input",
         }
@@ -267,6 +306,58 @@ async def converse(request: ConverseRequest):
             missing_fields = [field for field in required_fields if not session.get(field)]
             reply_text = f"I still need your {' and '.join(missing_fields)} to continue."
 
+    # 4b. Handle booking intent for already-registered visitors. This spans
+    # multiple turns (room/date/time/duration can arrive across several
+    # messages), so we accumulate into session["booking"] and only ask for
+    # whatever's still missing, rather than restarting each time.
+    if session.get("registered"):
+        cancelling = session.get("booking_active") and re.search(
+            r"\b(cancel|never mind|forget it|nevermind)\b", transcript, re.IGNORECASE
+        )
+        if cancelling:
+            session["booking_active"] = False
+            session["booking"] = {}
+            reply_text = "No problem - just let me know if you'd like to book something else."
+        elif action == "booking_intent" or session.get("booking_active"):
+            session["booking_active"] = True
+            booking = session.setdefault("booking", {})
+            try:
+                with SessionLocal() as db:
+                    parsed = await parse_booking_intent(db, transcript, service_type=session.get("service_type"))
+                for key in ("zone_id", "zone_name", "booking_date", "booking_time_start", "duration_minutes"):
+                    value = getattr(parsed, key, None)
+                    if not value:
+                        continue
+                    if key == "booking_time_start":
+                        booking[key] = value.strftime("%H:%M")
+                    elif hasattr(value, "isoformat"):
+                        booking[key] = value.isoformat()
+                    else:
+                        booking[key] = value
+            except Exception as e:
+                log_error(f"Booking intent parse error: {e}")
+
+            still_missing = []
+            if not booking.get("zone_id"):
+                still_missing.append("which room")
+            if not booking.get("booking_date"):
+                still_missing.append("what date")
+            if not booking.get("booking_time_start"):
+                still_missing.append("what time")
+            if not booking.get("duration_minutes"):
+                still_missing.append("how long you need it")
+
+            if still_missing:
+                reply_text = f"Got it. Could you also tell me {', '.join(still_missing)}?"
+            else:
+                session["booking_active"] = False
+                session["booking_ready"] = True
+                room_label = booking.get("zone_name") or booking.get("zone_id")
+                reply_text = (
+                    f"Great - {room_label} on {booking['booking_date']} at {booking['booking_time_start']} "
+                    f"for {booking['duration_minutes']} minutes. Let's confirm those details now."
+                )
+
     # 5. Generate TTS for the reply
     try:
         audio_bytes, content_type = await synthesize_speech(reply_text)
@@ -276,6 +367,14 @@ async def converse(request: ConverseRequest):
         content_type = None
 
     # 6. Return response
+    booking_ready_now = session.get("booking_ready", False)
+    if booking_ready_now:
+        # One-shot signal - the frontend hands off to the manual booking
+        # form to confirm, so don't keep repeating this once it's been sent.
+        session["booking_ready"] = False
+
+    just_registered_now = session.get("registered", False) and not was_registered_before_this_turn
+
     return {
         "session_id": request.session_id,
         "reply_text": reply_text,
@@ -283,6 +382,11 @@ async def converse(request: ConverseRequest):
         "audio_content_type": content_type,
         "session_ended": False,
         "registered": session.get("registered", False),
-        "extracted": {k: session[k] for k in ["name", "email", "phone", "visitor_type"] if session.get(k)},
+        "just_registered": just_registered_now,
+        "booking_ready": booking_ready_now,
+        "extracted": {
+            **{k: session[k] for k in ["name", "email", "phone", "visitor_type"] if session.get(k)},
+            **session.get("booking", {}),
+        },
         "step": action,
     }
