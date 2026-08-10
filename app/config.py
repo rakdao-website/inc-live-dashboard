@@ -25,10 +25,13 @@ class Settings(BaseSettings):
     # the browser's built-in speech synthesis automatically when this is
     # disabled or the call fails for any reason.
     tts_enabled: bool = False
-    tts_provider: str = "gemini"  # "xai" | "gemini"
-    gemini_tts_model: str = "gemini-2.5-flash-preview-tts"
-    gemini_tts_voice: str = "Kore"
+    tts_provider: str = "openrouter"  # "xai" | "gemini"
+    openrouter_tts_model: str = ""
+    openrouter_tts_voice: str = ""
 
+    openrouter_api_key: str  = ""
+    openrouter_stt_model: str = "openai/whisper-1"
+    openrouter_model: str = "google/gemini-2.5-flash"
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

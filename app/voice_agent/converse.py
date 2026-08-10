@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 import base64
 from google import genai
+from app.voice_agent.conversation_agent import get_next_response
 from app.voice_agent.gemini_service import get_gemini_response
 from app.voice_agent.tts_service import synthesize_speech, TtsUnavailable
 from app.voice_agent.session_manager import get_session,create_session,update_session,clear_session
@@ -13,6 +14,7 @@ from app.booking_intent_service import parse_booking_intent
 from app.database import SessionLocal
 import uuid
 import httpx
+import re
 
 
 
@@ -25,6 +27,16 @@ class ConverseRequest(BaseModel):
     audio: str = None
     message: str = None
     mime_type: str = "audio/wav"
+    # Set by the frontend once a visitor is already logged in/registered
+    # (e.g. reopening the assistant on a booking or other page), so the
+    # agent doesn't repeat the greeting/login/registration questions.
+    visitor_id: int = None
+    visitor_name: str = None
+    visitor_type: str = None
+    # Which booking page the visitor is on, if any (meeting_room /
+    # podcast_studio / tiktok_studio) - lets booking intent default the
+    # room when they don't name one explicitly.
+    service_type: str = None
 
 # Additional models at the top
 class RegisterRequest(BaseModel):
@@ -44,6 +56,75 @@ class BookingRequest(BaseModel):
     visitor_id: int
     service_type: str = "meeting_room"
 
+def normalize_phone_(phone: str):
+    if not phone:
+        return phone
+    phone = phone.strip()
+    if phone.startswith("+"):
+        return phone
+    # Remove leading zeros
+    cleaned = phone.lstrip("0")
+    # Assume UAE if no country code
+    return f"+971{cleaned}"
+
+from app.database import SessionLocal
+from app.models import Visitor
+
+async def find_visitor_by_phone(phone: str) -> dict | None:
+    """Find visitor by phone number using direct database query."""
+    if not phone:
+        return None
+    
+    # Clean phone: remove non-digit characters
+    digits = ''.join(filter(str.isdigit, phone))
+    if len(digits) < 7:
+        return None
+    
+    with SessionLocal() as db:
+        # Try exact match with phone as stored
+        visitor = db.query(Visitor).filter(Visitor.visitor_phone == phone).first()
+        if visitor:
+            return {
+                "visitor_id": visitor.visitor_id,
+                "visitor_name": visitor.visitor_name,
+                "visitor_phone": visitor.visitor_phone,
+                "visitor_email": visitor.visitor_email,
+                "visitor_type": visitor.visitor_type,
+            }
+        
+        # Try without country code (if phone has +)
+        if phone.startswith("+"):
+            without_plus = phone[1:]
+            visitor = db.query(Visitor).filter(Visitor.visitor_phone == without_plus).first()
+            if visitor:
+                return visitor_data(visitor)
+        
+        # Try with country code if phone doesn't have it
+        if not phone.startswith("+"):
+            with_plus = f"+{phone}"
+            visitor = db.query(Visitor).filter(Visitor.visitor_phone == with_plus).first()
+            if visitor:
+                return visitor_data(visitor)
+        
+        # Try last 9 digits (in case of format differences)
+        if len(digits) >= 9:
+            last_9 = digits[-9:]
+            visitor = db.query(Visitor).filter(Visitor.visitor_phone.like(f"%{last_9}")).first()
+            if visitor:
+                return visitor_data(visitor)
+        
+        # Try searching by name (if provided) but we only have phone here, so skip.
+    
+    return None
+
+def visitor_data(visitor):
+    return {
+        "visitor_id": visitor.visitor_id,
+        "visitor_name": visitor.visitor_name,
+        "visitor_phone": visitor.visitor_phone,
+        "visitor_email": visitor.visitor_email,
+        "visitor_type": visitor.visitor_type,
+    }
 @router.post("/converse")
 async def converse(request: ConverseRequest):
     # 1. If no session_id, create one
@@ -56,45 +137,46 @@ async def converse(request: ConverseRequest):
     if not session:
         raise HTTPException(status_code=404, detail="Invalid or expired session")
 
-    # 2. Ensure we have either audio or text
-    if not request.audio and not request.message:
-        raise HTTPException(status_code=400, detail="Either 'audio' or 'message' must be provided")
+    # 1b. If the frontend already knows who this visitor is (e.g. the voice
+    # assistant was reopened on a different page after they already logged
+    # in / registered), mark the session registered right away so the agent
+    # skips straight to Q&A instead of re-running the greeting/login flow.
+    if request.visitor_id and not session.get("registered"):
+        session.setdefault("collected", {})
+        session["visitor_id"] = request.visitor_id
+        session["registered"] = True
+        if request.visitor_name:
+            session["name"] = request.visitor_name
+            session["collected"]["name"] = request.visitor_name
+        if request.visitor_type:
+            session["visitor_type"] = request.visitor_type
+            session["collected"]["visitor_type"] = request.visitor_type
 
-    # 3. If not registered, try to extract from the first audio
-    if not session.get("registered"):
-        if not request.audio:
-            # User sent text only but not registered – ask for voice
-            reply_text = "Please say your name, email, and whether you're an existing customer."
-            try:
-                audio_bytes, content_type = await synthesize_speech(reply_text)
-                audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-            except TtsUnavailable:
-                audio_b64 = None
-                content_type = None
-            return {
-                "session_id": request.session_id,
-                "reply_text": reply_text,
-                "reply_audio": audio_b64,
-                "audio_content_type": content_type,
-                "session_ended": False,
-                "registered": False,
-            }
+    if request.service_type:
+        session["service_type"] = request.service_type
 
-        # Decode audio
+    # Snapshot registration state *after* the pre-authentication shortcut
+    # above but *before* this turn's login/register handling runs. This is
+    # what lets us tell "was already registered coming into this turn"
+    # (an already-known visitor greeted on a new page) apart from "this
+    # turn is the one that just completed login/registration" - only the
+    # latter should tell the frontend to wrap up and hand off.
+    was_registered_before_this_turn = session.get("registered", False)
+
+    # 2. Transcribe audio if provided
+    transcript = None
+    if request.audio:
         try:
             audio_bytes = base64.b64decode(request.audio)
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid audio base64")
-
-        # Transcribe the audio
         try:
-            # ✅ FIXED: Call transcribe_audio with only audio_bytes and mime_type
             transcript = await transcribe_audio(audio_bytes, request.mime_type)
             log_info(f"Transcript: {transcript}")
         except Exception as e:
             log_error(f"Transcription failed: {e}")
-            reply_text = "I couldn't understand the audio. Please say your name, email, and if you're an existing customer."
-            # ✅ Generate TTS and return error response
+            reply_text = "I couldn't understand the audio. Please try again."
+            # Generate TTS for error
             try:
                 audio_bytes, content_type = await synthesize_speech(reply_text)
                 audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
@@ -107,48 +189,23 @@ async def converse(request: ConverseRequest):
                 "reply_audio": audio_b64,
                 "audio_content_type": content_type,
                 "session_ended": False,
-                "registered": False,
-                "error": "transcription_failed",
+                "registered": session.get("registered", False),
+                "just_registered": False,
+                "extracted": None,
+                "step": "error",
             }
 
-        # Extract using your robust function
-        parsed: ParsedVisitor = await parse_visitor_intent(transcript)
-        if parsed.full_name and parsed.email and parsed.visitor_type:
-            phone = parsed.mobile_number
-            # Store the extracted info
-            update_session(
-                request.session_id,
-                name=parsed.full_name,
-                email=parsed.email,
-                phone=phone,
-                existing_customer=(parsed.visitor_type == "client")
-            )
-            reply_text = (
-                f"Thank you, {parsed.full_name}. I have your email as {parsed.email}. "
-                f"and phone as {phone if phone else ' not provided '}. "
-                f"You are {'an existing' if parsed.visitor_type == 'client' else 'a new'} customer. "
-                "How can I help you today?"
-            )
-        else:
-            # Ask for missing fields
-            missing = parsed.missing
-            reply_text = "I didn't catch all the details. "
-            if "full_name" in missing:
-                reply_text += "Please say your full name. "
-            if "email" in missing:
-                reply_text += "Please say your email address."
-            if "visitor_type" in missing:
-                reply_text += "And tell me if you are an existing customer."
-            # We don't register yet; will retry on next audio
+    elif request.message:
+        transcript = request.message
 
-        # Generate TTS for this response
+    if not transcript:
+        reply_text = "I didn't hear anything. Please try again."
         try:
             audio_bytes, content_type = await synthesize_speech(reply_text)
             audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
         except TtsUnavailable:
             audio_b64 = None
             content_type = None
-
         return {
             "session_id": request.session_id,
             "reply_text": reply_text,
@@ -156,21 +213,152 @@ async def converse(request: ConverseRequest):
             "audio_content_type": content_type,
             "session_ended": False,
             "registered": session.get("registered", False),
-            "extracted": parsed.to_dict() if parsed else None,
+            "just_registered": False,
+            "extracted": None,
+            "step": "waiting_input",
         }
 
-    # 4. Normal conversation (registered)
-    parts = []
-    if request.message:
-        parts.append(request.message)
-    if request.audio:
-        audio_bytes = base64.b64decode(request.audio)
-        parts.append(genai.types.Part.from_bytes(audio_bytes, mime_type=request.mime_type))
+    # 3. Get LLM response
+    llm_data = await get_next_response(transcript, session)
+    extracted = llm_data.get("extracted", {})
+    session.setdefault("collected", {})
+    for key, value in extracted.items():
+        if value and key in ["name", "email", "phone", "visitor_type"]:
+            session[key] = value
+            session["collected"][key] = value
 
-    reply_text, err = await get_gemini_response(request.session_id, parts)
-    if err:
-        raise HTTPException(status_code=500, detail=err)
+    missing = llm_data.get("missing", [])
+    session["missing"] = missing
 
+    action = llm_data.get("action", "retry")
+    reply_text = llm_data.get("reply", "Processing...")
+
+    # 4. Handle login/register if not already registered
+    # Login only needs a name + phone to look someone up. Registration also
+    # only needs name + phone - email is a nice-to-have (used if it was
+    # already picked up during the greeting) but never blocks either flow.
+    if action in ("login", "register") and not session.get("registered"):
+        required_fields = ["name", "phone"]
+        if all(session.get(field) for field in required_fields):
+            phone_normalized = normalize_phone_(session["phone"])
+            visitor = None
+
+            try:
+                if action == "login":
+                    # Try profile lookup via API
+                    async with httpx.AsyncClient() as client:
+                        resp = await client.post(
+                            "http://localhost:8000/api/kiosk/profile-lookup",
+                            json={
+                                "full_name": session["name"],
+                                "mobile_number": phone_normalized,
+                            }
+                        )
+                        if resp.status_code == 200:
+                            visitor = resp.json().get("data")
+                        else:
+                            # Fallback to direct DB search by phone
+                            visitor = await find_visitor_by_phone(phone_normalized)
+
+                    if visitor:
+                        session["visitor_id"] = visitor["visitor_id"]
+                        session["registered"] = True
+                        reply_text = f"Welcome back, {visitor['visitor_name']}! You are logged in. How can I help you today?"
+                    else:
+                        # Not found – fallback to registration
+                        reply_text = "I couldn't find your profile. Let's try registering you instead."
+                        action = "register"
+                        # Continue to registration block below (fall through)
+
+                if action == "register":
+                    # Try to create new visitor. Email is optional here -
+                    # use whatever's already been collected (may be None).
+                    async with httpx.AsyncClient() as client:
+                        resp = await client.post(
+                            "http://localhost:8000/api/kiosk/profiles",
+                            json={
+                                "full_name": session["name"],
+                                "email": session.get("email"),
+                                "mobile_number": phone_normalized,
+                                "visitor_type": session.get("visitor_type", "visitor"),
+                            }
+                        )
+                        if resp.status_code == 201:
+                            visitor = resp.json().get("data")
+                            session["visitor_id"] = visitor["visitor_id"]
+                            session["registered"] = True
+                            reply_text = f"Thank you, {session['name']}! You are registered. How can I help you today?"
+                        elif resp.status_code == 409:
+                            # Conflict – try to find existing visitor by phone
+                            visitor = await find_visitor_by_phone(phone_normalized)
+                            if visitor:
+                                session["visitor_id"] = visitor["visitor_id"]
+                                session["registered"] = True
+                                reply_text = f"Welcome back, {visitor['visitor_name']}! You are logged in. How can I help you today?"
+                            else:
+                                reply_text = "A profile with this phone number already exists, but I couldn't log you in. Please try again."
+                        else:
+                            reply_text = "Registration failed. Please try again later."
+            except Exception as e:
+                log_error(f"Registration/login error: {e}")
+                reply_text = "I had trouble processing that. Please try again."
+        else:
+            missing_fields = [field for field in required_fields if not session.get(field)]
+            reply_text = f"I still need your {' and '.join(missing_fields)} to continue."
+
+    # 4b. Handle booking intent for already-registered visitors. This spans
+    # multiple turns (room/date/time/duration can arrive across several
+    # messages), so we accumulate into session["booking"] and only ask for
+    # whatever's still missing, rather than restarting each time.
+    if session.get("registered"):
+        cancelling = session.get("booking_active") and re.search(
+            r"\b(cancel|never mind|forget it|nevermind)\b", transcript, re.IGNORECASE
+        )
+        if cancelling:
+            session["booking_active"] = False
+            session["booking"] = {}
+            reply_text = "No problem - just let me know if you'd like to book something else."
+        elif action == "booking_intent" or session.get("booking_active"):
+            session["booking_active"] = True
+            booking = session.setdefault("booking", {})
+            try:
+                with SessionLocal() as db:
+                    parsed = await parse_booking_intent(db, transcript, service_type=session.get("service_type"))
+                for key in ("zone_id", "zone_name", "booking_date", "booking_time_start", "duration_minutes"):
+                    value = getattr(parsed, key, None)
+                    if not value:
+                        continue
+                    if key == "booking_time_start":
+                        booking[key] = value.strftime("%H:%M")
+                    elif hasattr(value, "isoformat"):
+                        booking[key] = value.isoformat()
+                    else:
+                        booking[key] = value
+            except Exception as e:
+                log_error(f"Booking intent parse error: {e}")
+
+            still_missing = []
+            if not booking.get("zone_id"):
+                still_missing.append("which room")
+            if not booking.get("booking_date"):
+                still_missing.append("what date")
+            if not booking.get("booking_time_start"):
+                still_missing.append("what time")
+            if not booking.get("duration_minutes"):
+                still_missing.append("how long you need it")
+
+            if still_missing:
+                reply_text = f"Got it. Could you also tell me {', '.join(still_missing)}?"
+            else:
+                session["booking_active"] = False
+                session["booking_ready"] = True
+                room_label = booking.get("zone_name") or booking.get("zone_id")
+                reply_text = (
+                    f"Great - {room_label} on {booking['booking_date']} at {booking['booking_time_start']} "
+                    f"for {booking['duration_minutes']} minutes. Let's confirm those details now."
+                )
+
+    # 5. Generate TTS for the reply
     try:
         audio_bytes, content_type = await synthesize_speech(reply_text)
         audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
@@ -178,306 +366,27 @@ async def converse(request: ConverseRequest):
         audio_b64 = None
         content_type = None
 
-    ended = False
-    if "goodbye" in reply_text.lower():
-        clear_session(request.session_id)
-        ended = True
+    # 6. Return response
+    booking_ready_now = session.get("booking_ready", False)
+    if booking_ready_now:
+        # One-shot signal - the frontend hands off to the manual booking
+        # form to confirm, so don't keep repeating this once it's been sent.
+        session["booking_ready"] = False
+
+    just_registered_now = session.get("registered", False) and not was_registered_before_this_turn
 
     return {
         "session_id": request.session_id,
         "reply_text": reply_text,
         "reply_audio": audio_b64,
         "audio_content_type": content_type,
-        "session_ended": ended,
-        "registered": True,
-    }
-
-@router.post("/register")
-async def register_voice(request: RegisterRequest):
-    # 1. Create session if not provided
-    if not request.session_id:
-        request.session_id = str(uuid.uuid4())
-        create_session(request.session_id)
-        log_info(f"New session created: {request.session_id}")
-
-    session = get_session(request.session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Invalid or expired session")
-
-    # 2. Decode and transcribe
-    if not request.audio:
-        raise HTTPException(status_code=400, detail="Audio required")
-    try:
-        audio_bytes = base64.b64decode(request.audio)
-    except:
-        raise HTTPException(status_code=400, detail="Invalid audio base64")
-    try:
-        transcript = await transcribe_audio(audio_bytes, request.mime_type)
-        log_info(f"Transcript: {transcript}")
-    except Exception as e:
-        log_error(f"Transcription failed: {e}")
-        reply_text = "I couldn't understand the audio. Please try again."
-        try:
-            audio_bytes, content_type = await synthesize_speech(reply_text)
-            audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-        except TtsUnavailable:
-            audio_b64 = None
-        return {
-            "session_id": request.session_id,
-            "reply_text": reply_text,
-            "reply_audio": audio_b64,
-            "registered": False,
-        }
-
-    # 3. Extract using your robust parser
-    parsed = await parse_visitor_intent(transcript)
-    if parsed.full_name and parsed.email and parsed.mobile_number and parsed.visitor_type:
-        # Store all fields in session
-        update_session(
-            request.session_id,
-            name=parsed.full_name,
-            email=parsed.email,
-            phone=parsed.mobile_number,
-            existing_customer=(parsed.visitor_type == "client")
-        )
-        reply_text = (
-            f"Thank you, {parsed.full_name}. I have your email as {parsed.email} "
-            f"and phone as {parsed.mobile_number}. "
-            f"You are {'an existing' if parsed.visitor_type == 'client' else 'a new'} customer. "
-            "You are now registered. How can I help you today?"
-        )
-    else:
-        # Ask for missing fields
-        missing = parsed.missing
-        reply_text = "I didn't catch all the details. "
-        if "full_name" in missing:
-            reply_text += "Please say your full name. "
-        if "email" in missing:
-            reply_text += "Please say your email address. "
-        if "mobile_number" in missing:
-            reply_text += "Please say your phone number. "
-        reply_text += "And tell me if you are an existing customer."
-
-    # 4. Generate TTS for the reply
-    try:
-        audio_bytes, content_type = await synthesize_speech(reply_text)
-        audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-    except TtsUnavailable:
-        audio_b64 = None
-
-    return {
-        "session_id": request.session_id,
-        "extracted": parsed.to_dict() if parsed else None,
-        "reply_text": reply_text,
-        "reply_audio": audio_b64,
-        "audio_content_type": content_type,
+        "session_ended": False,
         "registered": session.get("registered", False),
-    }
-
-
-@router.post("/login")
-async def login_voice(request: LoginRequest):
-    # 1. Create session if not provided
-    if not request.session_id:
-        request.session_id = str(uuid.uuid4())
-        create_session(request.session_id)
-        log_info(f"New session created: {request.session_id}")
-
-    session = get_session(request.session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Invalid or expired session")
-
-    # 2. Decode and transcribe
-    if not request.audio:
-        raise HTTPException(status_code=400, detail="Audio required")
-    try:
-        audio_bytes = base64.b64decode(request.audio)
-    except:
-        raise HTTPException(status_code=400, detail="Invalid audio base64")
-    try:
-        transcript = await transcribe_audio(audio_bytes, request.mime_type)
-        log_info(f"Transcript: {transcript}")
-    except Exception as e:
-        log_error(f"Transcription failed: {e}")
-        reply_text = "I couldn't understand the audio. Please try again."
-        try:
-            audio_bytes, content_type = await synthesize_speech(reply_text)
-            audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-        except TtsUnavailable:
-            audio_b64 = None
-        return {
-            "session_id": request.session_id,
-            "reply_text": reply_text,
-            "reply_audio": audio_b64,
-        }
-
-    # 3. Extract using the same parser (we only need name and phone)
-    parsed = await parse_visitor_intent(transcript)
-    if parsed.full_name and parsed.mobile_number:
-        # Store minimal info in session (optional)
-        update_session(
-            request.session_id,
-            name=parsed.full_name,
-            phone=parsed.mobile_number,
-            # Don't set email or existing_customer because we don't have them
-        )
-        reply_text = f"Welcome back, {parsed.full_name}. I have your phone number as {parsed.mobile_number}. How can I help you?"
-    else:
-        missing = parsed.missing
-        reply_text = "I didn't catch all the details. "
-        if "full_name" in missing:
-            reply_text += "Please say your full name. "
-        if "mobile_number" in missing:
-            reply_text += "Please say your phone number. "
-
-    # 4. Generate TTS
-    try:
-        audio_bytes, content_type = await synthesize_speech(reply_text)
-        audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-    except TtsUnavailable:
-        audio_b64 = None
-
-    return {
-        "session_id": request.session_id,
+        "just_registered": just_registered_now,
+        "booking_ready": booking_ready_now,
         "extracted": {
-            "full_name": parsed.full_name,
-            "mobile_number": parsed.mobile_number,
-        } if parsed.full_name and parsed.mobile_number else None,
-        "reply_text": reply_text,
-        "reply_audio": audio_b64,
-        "audio_content_type": content_type,
-        "logged_in": bool(parsed.full_name and parsed.mobile_number),
-    }
-
-@router.post("/booking")
-async def booking(request: BookingRequest):
-    # 1. Validate session
-    if not request.session_id:
-        request.session_id = str(uuid.uuid4())
-        create_session(request.session_id, visitor_id=request.visitor_id)
-        log_info(f"New session created: {request.session_id}")
-    session = get_session(request.session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Invalid or expired session")
-    if session.get("visitor_id") != request.visitor_id:
-        session["visitor_id"] = request.visitor_id
-
-    # 2. Decode and transcribe
-    if not request.audio:
-        raise HTTPException(status_code=400, detail="Audio required")
-    try:
-        audio_bytes = base64.b64decode(request.audio)
-    except:
-        raise HTTPException(status_code=400, detail="Invalid audio base64")
-    try:
-        transcript = await transcribe_audio(audio_bytes, request.mime_type)
-        log_info(f"Booking transcript: {transcript}")
-    except Exception as e:
-        log_error(f"Transcription failed: {e}")
-        reply_text = "I couldn't understand the audio. Please try again."
-        try:
-            audio_bytes, content_type = await synthesize_speech(reply_text)
-            audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-        except TtsUnavailable:
-            audio_b64 = None
-        return {
-            "session_id": request.session_id,
-            "reply_text": reply_text,
-            "reply_audio": audio_b64,
-        }
-
-    # 3. Parse booking using your existing parser
-    try:
-        with SessionLocal() as db:
-            parsed = await parse_booking_intent(db, transcript, request.service_type)
-        booking_data = parsed.to_dict()
-    except Exception as e:
-        log_error(f"Booking parsing failed: {e}")
-        reply_text = "I couldn't understand your booking details. Please try again."
-        try:
-            audio_bytes, content_type = await synthesize_speech(reply_text)
-            audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-        except TtsUnavailable:
-            audio_b64 = None
-        return {
-            "session_id": request.session_id,
-            "reply_text": reply_text,
-            "reply_audio": audio_b64,
-        }
-
-    # 4. Check for missing fields
-    if parsed.missing:
-        missing_labels = []
-        if "room" in parsed.missing:
-            missing_labels.append("the room name")
-        if "date" in parsed.missing:
-            missing_labels.append("the date")
-        if "time" in parsed.missing:
-            missing_labels.append("the time")
-        if "duration" in parsed.missing:
-            missing_labels.append("the duration")
-        reply_text = f"I need {', '.join(missing_labels)}. Please say them clearly."
-        try:
-            audio_bytes, content_type = await synthesize_speech(reply_text)
-            audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-        except TtsUnavailable:
-            audio_b64 = None
-        return {
-            "session_id": request.session_id,
-            "booking_details": booking_data,
-            "reply_text": reply_text,
-            "reply_audio": audio_b64,
-        }
-
-    # 5. Call internal booking API
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                "http://localhost:8000/api/kiosk/bookings",
-                json={
-                    "visitor_id": request.visitor_id,
-                    "service_type": request.service_type,
-                    "zone_id": booking_data["zone_id"],
-                    "booking_date": booking_data["booking_date"],
-                    "booking_time_start": booking_data["booking_time_start"],
-                    "duration_minutes": int(booking_data["duration_minutes"]),
-                }
-            )
-            if resp.status_code != 200:
-                error_detail = resp.json().get("detail", "Booking failed")
-                raise Exception(error_detail)
-            booking_result = resp.json()
-    except Exception as e:
-        reply_text = f"Booking failed: {str(e)}"
-        try:
-            audio_bytes, content_type = await synthesize_speech(reply_text)
-            audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-        except TtsUnavailable:
-            audio_b64 = None
-        return {
-            "session_id": request.session_id,
-            "booking_details": booking_data,
-            "reply_text": reply_text,
-            "reply_audio": audio_b64,
-        }
-
-    # 6. Success TTS
-    reply_text = (
-        f"Booking confirmed for {booking_data['zone_name'] or booking_data['zone_id']} "
-        f"on {booking_data['booking_date']} at {booking_data['booking_time_start']} "
-        f"for {booking_data['duration_minutes']} minutes."
-    )
-    try:
-        audio_bytes, content_type = await synthesize_speech(reply_text)
-        audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-    except TtsUnavailable:
-        audio_b64 = None
-
-    return {
-        "session_id": request.session_id,
-        "booking_details": booking_data,
-        "booking_result": booking_result,
-        "reply_text": reply_text,
-        "reply_audio": audio_b64,
-        "audio_content_type": content_type,
+            **{k: session[k] for k in ["name", "email", "phone", "visitor_type"] if session.get(k)},
+            **session.get("booking", {}),
+        },
+        "step": action,
     }
