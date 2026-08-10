@@ -1,44 +1,38 @@
 import json
+import os
 from  app.openrouter import call_openrouter
 from app.voice_agent.utils.logger import log_error,log_info
 
-# Ground-truth facts for answering visitor questions. Keep this in sync with
-# reality - the agent is instructed to answer general questions from this
-# block only, not to invent details.
-KNOWLEDGE_BASE = """
-OFFICE & ROOM AVAILABILITY
-- Ground Floor: 1 office available (out of 19).
-- 5th Floor: 3 offices available (out of 22).
-- Common Area: comfortably fits up to 25 people.
+# The knowledge base lives in its own document (knowledge_base.md, next to
+# this file) instead of a hardcoded string, so non-engineers can update the
+# facts the assistant answers questions from without touching code. It's
+# re-read on every request (see _load_knowledge_base), so edits take effect
+# immediately - no restart or redeploy needed.
+_KNOWLEDGE_BASE_PATH = os.path.join(os.path.dirname(__file__), "knowledge_base.md")
 
-MEETING ROOMS
-- Meeting Room 1: max capacity 6 people, 1 screen available.
-- Meeting Room 2: max capacity 5 people, 1 screen available.
-- Note: guests cannot access the meeting room screens themselves yet (coming soon). Booking is done via the on-site kiosk, which guides the user through the process.
+_FALLBACK_KNOWLEDGE_BASE = (
+    "(Knowledge base document is currently unavailable. Tell the visitor you're "
+    "not sure and suggest they ask a reception associate for details.)"
+)
 
-WORKING HOURS
-- Monday-Thursday: 8:00 AM - 5:00 PM.
-- Friday: 8:00 AM - 12:00 PM and 2:00 PM - 4:00 PM.
+_kb_cache: dict = {"mtime": None, "content": None}
 
-WIFI & AMENITIES
-- WiFi is free. Guests must ask reception for the password - the assistant does not know the password itself.
-- Prayer rooms are on the top floor (Floor R), accessible only via the dedicated elevator bank - ask reception for directions.
-- The cafeteria is also on the top floor (Floor R).
-- Innovation City is fully wheelchair accessible.
+def _load_knowledge_base() -> str:
+    try:
+        mtime = os.path.getmtime(_KNOWLEDGE_BASE_PATH)
+        if _kb_cache["mtime"] == mtime and _kb_cache["content"] is not None:
+            return _kb_cache["content"]
+        with open(_KNOWLEDGE_BASE_PATH, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+        content = content if content else _FALLBACK_KNOWLEDGE_BASE
+        _kb_cache["mtime"] = mtime
+        _kb_cache["content"] = content
+        return content
+    except Exception as e:
+        log_error(f"Could not load knowledge base document at {_KNOWLEDGE_BASE_PATH}: {e}")
+        return _FALLBACK_KNOWLEDGE_BASE
 
-UPCOMING STUDIOS (COMING SOON)
-- A podcast studio and a TikTok studio are launching soon.
-- Promotion: free for Innovation City customers for a limited time after launch.
-
-ABOUT INNOVATION CITY
-- Ras Al Khaimah's dedicated hub for innovation-driven businesses.
-- Offers an AI-powered registry, on-chain licensing, and simultaneous banking setup.
-- Vision: to be a global tech hub and the region's most successful premium free zone.
-- Mission: attract thousands of startups/entrepreneurs and maintain a startup culture.
-- Values: embrace the future, welcome global talent, and help them achieve success.
-"""
-
-SYSTEM_PROMPT = """
+SYSTEM_PROMPT_TEMPLATE = """
 You are a friendly, conversational voice assistant for Innovation City, a business hub in RAK.
 Your job is to greet visitors, sign them in (log in an existing client or register a new visitor),
 and then help with their request.
@@ -86,7 +80,7 @@ missing, so don't worry about asking for specifics yourself.
 **Knowledge base - use this, and only this, for general questions about Innovation City**
 (opening hours, room availability, amenities, wifi, studios, company info, etc.):
 
-""" + KNOWLEDGE_BASE + """
+{knowledge_base}
 
 **Rules:**
 - If the user provides multiple pieces of information at once, extract them all.
@@ -94,8 +88,12 @@ missing, so don't worry about asking for specifics yourself.
   base above. Never invent or guess facts (numbers, hours, capacities, locations) that aren't in it.
   If something isn't covered by the knowledge base, say you're not sure and suggest they ask a
   reception associate, rather than making something up.
-- Room/service bookings are handled through the on-site kiosk, which walks the visitor through it -
-  don't try to book anything yourself in this conversation, just point them to it.
+- If someone asks about a room or service, answer their question first (capacity, availability, etc.
+  from the knowledge base). Then, if they want to book it - either right away or after you've
+  answered - you can take the booking yourself right here in this conversation: set
+  action = "booking_intent" (see below). Don't tell them to go somewhere else or use a kiosk
+  separately - you ARE how they book it. If they're not registered/logged in yet, get their name,
+  email/existing-customer status, and phone first (per Step 1/2 above) - you can then help them book.
 - Decide the action as soon as the relevant branch's required fields are present:
   - visitor_type = "client" (existing customer) and name + phone known -> action = "login"
   - visitor_type = "visitor" (not an existing customer) and name + phone known -> action = "register"
@@ -134,7 +132,7 @@ User: "What time does the center close?"
 Assistant: {"reply": "We're open 8 AM to 5 PM Monday through Thursday, and 8 AM to 12 PM and 2 PM to 4 PM on Fridays.", "action": "answer_question", "extracted": {}}
 
 User: "Is there a meeting room free with a screen for 6 people?"
-Assistant: {"reply": "Yes - Meeting Room 1 fits up to 6 people and has a screen, though screen access is coming soon. You can book it through the on-site kiosk, which will guide you through the process.", "action": "answer_question", "extracted": {}}
+Assistant: {"reply": "Yes - Meeting Room 1 fits up to 6 people and has a screen, though screen access is coming soon. Want me to book it for you?", "action": "answer_question", "extracted": {}}
 
 User: "What's the wifi password?"
 Assistant: {"reply": "WiFi is free, but you'll need to ask a reception associate for the password - I don't have it myself.", "action": "answer_question", "extracted": {}}
@@ -143,19 +141,27 @@ User: "Hello" (context says Sara is already logged in)
 Assistant: {"reply": "Welcome back, Sara! How can I help you today?", "action": "answer_question", "extracted": {}, "missing": []}
 
 User: "Is Meeting Room 2 free right now?" (context says this visitor is already registered)
-Assistant: {"reply": "Meeting Room 2 fits up to 5 people and has a screen. You can book it any time through the on-site kiosk.", "action": "answer_question", "extracted": {}, "missing": []}
+Assistant: {"reply": "Meeting Room 2 fits up to 5 people and has a screen. Want me to book it for you?", "action": "answer_question", "extracted": {}, "missing": []}
 
-User: "I'd like to book a meeting room for tomorrow at 2pm for an hour." (already registered)
+User: "Yes please, for tomorrow at 3pm for an hour."
 Assistant: {"reply": "Sure, let's get that booked for you.", "action": "booking_intent", "extracted": {}, "missing": []}
 
 Be concise, warm, and professional. Always respond with valid JSON.
 """
+
+def _build_system_prompt() -> str:
+    # Plain string replace (not .format()) on purpose - the template above
+    # is full of literal { } from the JSON examples, which .format() would
+    # try to parse as fields and choke on.
+    return SYSTEM_PROMPT_TEMPLATE.replace("{knowledge_base}", _load_knowledge_base())
 
 async def get_next_response(transcript: str, session_data: dict) -> dict:
     """
     Send the conversation transcript and session state to the LLM,
     and return the parsed JSON response.
     """
+    system_prompt = _build_system_prompt()
+
     # Build a context message with current collected data
     collected = session_data.get("collected", {})
     context = f"Current collected info: {collected}. "
@@ -172,7 +178,7 @@ async def get_next_response(transcript: str, session_data: dict) -> dict:
     full_prompt = context + f"\nUser said: \"{transcript}\""
 
     try:
-        raw = await call_openrouter(full_prompt, system=SYSTEM_PROMPT)
+        raw = await call_openrouter(full_prompt, system=system_prompt)
         # Parse JSON from the response (may have markdown)
         if "```json" in raw:
             raw = raw.split("```json")[1].split("```")[0]

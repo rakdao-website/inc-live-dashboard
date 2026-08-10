@@ -167,7 +167,11 @@ async def parse_booking_intent(db: Session, transcript: str, service_type: str |
     if matched_room:
         result.zone_id = matched_room["zone_id"]
         result.zone_name = matched_room["zone_name"]
-    elif service_type in {"meeting_room", "podcast_studio", "tiktok_studio"}:
+    elif service_type in {"podcast_studio", "tiktok_studio"}:
+        # These services have exactly one physical room, so it's safe to
+        # default without asking. Meeting rooms are NOT included here -
+        # there are two of them, so if the visitor didn't name one, we
+        # should ask which they want rather than silently picking Room 1.
         _, default_zone_id, default_room_name = service_to_booking_defaults(service_type)
         result.zone_id = default_zone_id
         result.zone_name = default_room_name

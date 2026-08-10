@@ -4,7 +4,7 @@ import base64
 from google import genai
 from app.voice_agent.conversation_agent import get_next_response
 from app.voice_agent.gemini_service import get_gemini_response
-from app.voice_agent.tts_service import synthesize_speech, TtsUnavailable
+from app.voice_agent.tts_service import synthesize_speech
 from app.voice_agent.session_manager import get_session,create_session,update_session,clear_session
 from app.voice_agent.utils.logger import log_info, log_error
 from app.registration_intent_service import parse_visitor_intent, ParsedVisitor
@@ -180,7 +180,11 @@ async def converse(request: ConverseRequest):
             try:
                 audio_bytes, content_type = await synthesize_speech(reply_text)
                 audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-            except TtsUnavailable:
+            except Exception as tts_exc:
+                # TTS is a nice-to-have, not the core function - any failure
+                # here (unavailable, timeout, connection error, etc.) should
+                # fall back to a text-only reply rather than crash the turn.
+                log_error(f"TTS failed, falling back to text-only reply: {tts_exc}")
                 audio_b64 = None
                 content_type = None
             return {
@@ -203,7 +207,8 @@ async def converse(request: ConverseRequest):
         try:
             audio_bytes, content_type = await synthesize_speech(reply_text)
             audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-        except TtsUnavailable:
+        except Exception as tts_exc:
+            log_error(f"TTS failed, falling back to text-only reply: {tts_exc}")
             audio_b64 = None
             content_type = None
         return {
@@ -362,7 +367,13 @@ async def converse(request: ConverseRequest):
     try:
         audio_bytes, content_type = await synthesize_speech(reply_text)
         audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-    except TtsUnavailable:
+    except Exception as tts_exc:
+        # TTS is a nice-to-have, not the core function - any failure here
+        # (unavailable, timeout, connection error, etc.) should fall back
+        # to a text-only reply rather than 500 the whole conversation turn.
+        # The frontend already falls back to browser speech synthesis
+        # whenever reply_audio comes back empty.
+        log_error(f"TTS failed, falling back to text-only reply: {tts_exc}")
         audio_b64 = None
         content_type = None
 

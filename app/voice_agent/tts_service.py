@@ -16,6 +16,7 @@ sample rate wrong produces audio that "plays" but at the wrong pitch/speed,
 so it's parsed from the actual response rather than assumed constant.
 """
 
+import asyncio
 import base64
 import re
 import struct
@@ -28,6 +29,17 @@ import wave
 import io
 
 TTS_TIMEOUT_SECONDS = 15
+# Transient network hiccups (timeouts, dropped connections) to the TTS
+# provider tend to succeed on a quick second try, same as manually retrying
+# from the UI - so retry once, briefly, before giving up and letting the
+# caller fall back to text-only / browser speech synthesis.
+TTS_MAX_ATTEMPTS = 2
+TTS_RETRY_DELAY_SECONDS = 0.75
+
+# Reused across every call instead of opening a fresh connection (and doing
+# a new TLS handshake) each time - same host as the LLM calls, so this also
+# benefits from connection keep-alive.
+_client = httpx.AsyncClient(timeout=TTS_TIMEOUT_SECONDS)
 
 class TtsUnavailable(RuntimeError):
     """Raised when TTS is disabled, unconfigured, or the provider call fails."""
@@ -79,8 +91,25 @@ async def _synthesize_openrouter(text: str) -> tuple[bytes, str]:
         "response_format": response_format,
     }
 
-    async with httpx.AsyncClient(timeout=TTS_TIMEOUT_SECONDS) as client:
-        response = await client.post(url, json=payload, headers=headers)
+    response = None
+    last_network_error: Exception | None = None
+    for attempt in range(1, TTS_MAX_ATTEMPTS + 1):
+        try:
+            response = await _client.post(url, json=payload, headers=headers)
+            break
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            last_network_error = exc
+            if attempt < TTS_MAX_ATTEMPTS:
+                await asyncio.sleep(TTS_RETRY_DELAY_SECONDS)
+                continue
+            raise TtsUnavailable(
+                f"OpenRouter TTS request failed after {TTS_MAX_ATTEMPTS} attempts: {exc}"
+            ) from exc
+
+    if response is None:
+        # Should be unreachable (the loop above either returns a response or
+        # raises), but keeps type-checkers and future refactors honest.
+        raise TtsUnavailable(f"OpenRouter TTS request failed: {last_network_error}")
 
     if response.status_code != 200:
         try:
