@@ -78,7 +78,9 @@ app.add_middleware(
         "http://localhost:3003",
         "http://127.0.0.1:3003",
         "http://localhost:8000",
-        "http://127.0.0.1:8000"
+        "http://127.0.0.1:8000",
+        "http://localhost:5500",  # common "Live Server" VS Code extension port
+        "http://127.0.0.1:5500"
     ],
     allow_credentials=True,
     allow_methods=["*"],

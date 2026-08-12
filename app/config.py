@@ -24,10 +24,21 @@ class Settings(BaseSettings):
     # Server-side text-to-speech. Off by default; the frontend falls back to
     # the browser's built-in speech synthesis automatically when this is
     # disabled or the call fails for any reason.
+    xai_api_key: str = ""
+    xai_model: str = "grok-4"
+    xai_tts_codec: str = "mp3"
+    xai_tts_language: str = "en-US"
+
+    conversation_provider: str = "xai"
+
+
+
     tts_enabled: bool = False
-    tts_provider: str = "openrouter"  # "xai" | "gemini"
+    tts_provider: str = "xai"  # "xai" | "gemini"
     openrouter_tts_model: str = ""
     openrouter_tts_voice: str = ""
+    xai_tts_model: str = ""
+    xai_tts_voice: str = ""
 
     openrouter_api_key: str  = ""
     openrouter_stt_model: str = "openai/whisper-1"
