@@ -294,6 +294,10 @@
       <input type="checkbox" id="show-debug" />
       <label for="show-debug" style="margin:0;">Show raw response per turn</label>
     </div>
+    <div class="checkbox-row">
+      <input type="checkbox" id="continuous-mode" />
+      <label for="continuous-mode" style="margin:0;">Continuous conversation (auto-listen after each reply, like the real app)</label>
+    </div>
   </section>
 
   <section class="block">
@@ -433,16 +437,27 @@
     return arr;
   }
 
-  function playAudio(base64, contentType) {
-    if (!base64 || !$("autoplay").checked) return;
+  function playAudio(base64, contentType, onFinished) {
+    if (!base64 || !$("autoplay").checked) {
+      onFinished?.();
+      return;
+    }
     try {
       const blob = new Blob([base64ToBytes(base64)], { type: contentType || "audio/mpeg" });
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
-      audio.onended = () => URL.revokeObjectURL(url);
-      audio.play().catch(() => {});
+      audio.onended = () => {
+        URL.revokeObjectURL(url);
+        onFinished?.();
+      };
+      audio.onerror = () => {
+        URL.revokeObjectURL(url);
+        onFinished?.();
+      };
+      audio.play().catch(() => onFinished?.());
     } catch (e) {
       console.error("Failed to play reply audio:", e);
+      onFinished?.();
     }
   }
 
@@ -506,8 +521,11 @@
     // Call once the SSE stream ends. `oneShotFallbackBase64` is the
     // server's one-shot audio (only present when nothing was actually
     // streamed - e.g. a login/booking reply that got overridden after the
-    // LLM finished) - used only if no chunks were ever streamed.
-    finish(oneShotFallbackBase64, oneShotFallbackContentType) {
+    // LLM finished) - used only if no chunks were ever streamed. Returns
+    // the <audio> element actually playing (MSE path) so the caller can
+    // attach an 'ended' listener, or null if playback completion is
+    // already being handled internally (or there's nothing to play).
+    finish(oneShotFallbackBase64, oneShotFallbackContentType, onFinished) {
       if (this.supported && this.mediaSource.readyState === "open") {
         const tryEnd = () => {
           if (this.queue.length === 0 && this.sourceBuffer && !this.sourceBuffer.updating) {
@@ -521,18 +539,24 @@
           }
         };
         tryEnd();
-        return;
+        return this.audioEl;
       }
 
       if (oneShotFallbackBase64) {
-        playAudio(oneShotFallbackBase64, oneShotFallbackContentType);
+        playAudio(oneShotFallbackBase64, oneShotFallbackContentType, onFinished);
       } else if (this.bufferedChunksForFallback.length) {
         const blob = new Blob(this.bufferedChunksForFallback, { type: this.mimeType });
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
-        audio.onended = () => URL.revokeObjectURL(url);
-        audio.play().catch(() => {});
+        audio.onended = () => {
+          URL.revokeObjectURL(url);
+          onFinished?.();
+        };
+        audio.play().catch(() => onFinished?.());
+      } else {
+        onFinished?.();
       }
+      return null;
     }
   }
 
@@ -544,15 +568,6 @@
       ? "MediaSource + audio/mpeg: supported in this browser ✓"
       : "MediaSource + audio/mpeg: NOT supported here - will fall back to buffer-then-play";
   })();
-  
-  // ...existing code...
-  function buildApiUrl(base, endpoint) {
-    const root = (base || "").replace(/\/+$/, "");
-    const ep = (endpoint || "").trim();
-    if (!ep) return root;
-    if (/^https?:\/\//i.test(ep)) return ep;
-    return root + (ep.startsWith("/") ? ep : "/" + ep);
-  }
 
   async function sendMessage(text) {
     if (!text || state.busy) return;
@@ -578,8 +593,7 @@
     if (service) payload.service_type = service;
 
     try {
-      const url = buildApiUrl(baseUrl, path);
-      const res = await fetch(url, {
+      const res = await fetch(baseUrl + path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -604,8 +618,10 @@
       const wrap = addMessage("assistant", data.reply_text, metaBits.join(" · "));
       addDebugPanel(wrap, data);
 
-      playAudio(data.reply_audio, data.audio_content_type);
-      setStatus("idle");
+      playAudio(data.reply_audio, data.audio_content_type, () => {
+        setStatus("idle");
+        maybeAutoListen();
+      });
     } catch (err) {
       console.error(err);
       setStatus("network error", true);
@@ -616,131 +632,6 @@
     }
   }
 
-  async function sendMessageStreaming(text) {
-    if (!text || state.busy) return;
-    state.busy = true;
-    $("send-btn").disabled = true;
-    setStatus("connecting (stream)…");
-
-    addMessage("user", text);
-
-    const baseUrl = $("base-url").value.replace(/\/$/, "");
-    const path = $("stream-endpoint-path").value;
-
-    const payload = { message: text };
-    if (state.sessionId) payload.session_id = state.sessionId;
-    if (simVisitor.checked) {
-      const vid = parseInt($("visitor-id").value, 10);
-      if (!Number.isNaN(vid)) payload.visitor_id = vid;
-      payload.visitor_name = $("visitor-name").value || undefined;
-      payload.visitor_type = $("visitor-type").value || undefined;
-    }
-    const service = $("service-type").value;
-    if (service) payload.service_type = service;
-
-    let player = null;
-    let audioChunkCount = 0;
-    let assistantWrap = null;
-    let finalData = null;
-
-    try {
-      const url = buildApiUrl(baseUrl, path);
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-
-      if (!res.ok || !res.body) {
-        setStatus("HTTP " + (res.status || "?"), true);
-        addMessage("assistant", "Streaming request failed.", "error");
-        return;
-      }
-
-      setStatus("streaming…");
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        let sepIndex;
-        while ((sepIndex = buffer.indexOf("\n\n")) !== -1) {
-          const rawEvent = buffer.slice(0, sepIndex);
-          buffer = buffer.slice(sepIndex + 2);
-          const line = rawEvent.split("\n").find((l) => l.startsWith("data:"));
-          if (!line) continue;
-
-          let event;
-          try {
-            event = JSON.parse(line.slice(5).trim());
-          } catch {
-            continue;
-          }
-
-          if (event.type === "audio_chunk") {
-            if (!assistantWrap) {
-              assistantWrap = addMessage("assistant", "🔊 …", "streaming audio…");
-            }
-            if ($("autoplay").checked) {
-              if (!player) player = new StreamingAudioPlayer(event.content_type || "audio/mpeg");
-              player.push(base64ToBytes(event.audio));
-            }
-            audioChunkCount++;
-            if (assistantWrap) {
-              updateMessageBubble(assistantWrap, "🔊 …", `${audioChunkCount} audio chunk(s) received…`);
-            }
-          } else if (event.type === "final") {
-            finalData = event;
-          }
-        }
-      }
-
-      if (!finalData) {
-        const msg = "Stream ended without a final response.";
-        if (assistantWrap) updateMessageBubble(assistantWrap, msg, "error");
-        else addMessage("assistant", msg, "error");
-        return;
-      }
-
-      state.sessionId = finalData.session_id || state.sessionId;
-      updateSessionDisplay();
-      updateFlags(finalData);
-
-      const metaBits = [
-        finalData.step ? "action: " + finalData.step : null,
-        audioChunkCount > 0
-          ? audioChunkCount + " audio chunks streamed in real time"
-          : "no streamed audio - one-shot fallback clip",
-      ].filter(Boolean);
-
-      if (assistantWrap) {
-        updateMessageBubble(assistantWrap, finalData.reply_text, metaBits.join(" · "));
-      } else {
-        assistantWrap = addMessage("assistant", finalData.reply_text, metaBits.join(" · "));
-      }
-      addDebugPanel(assistantWrap, finalData);
-
-      if (player) {
-        player.finish(audioChunkCount === 0 ? finalData.reply_audio : null, finalData.audio_content_type);
-      } else {
-        playAudio(finalData.reply_audio, finalData.audio_content_type);
-      }
-
-      setStatus("idle");
-    } catch (err) {
-      console.error(err);
-      setStatus("network error", true);
-      addMessage("assistant", "Could not reach the backend (streaming). Is it running at " + baseUrl + "?", "error");
-    } finally {
-      state.busy = false;
-      $("send-btn").disabled = false;
-    }
-  }
-// ...existing code...
   async function sendMessageStreaming(text) {
     if (!text || state.busy) return;
     state.busy = true;
@@ -849,15 +740,34 @@
       addDebugPanel(assistantWrap, finalData);
 
       if (player) {
-        player.finish(audioChunkCount === 0 ? finalData.reply_audio : null, finalData.audio_content_type);
+        const audioEl = player.finish(
+          audioChunkCount === 0 ? finalData.reply_audio : null,
+          finalData.audio_content_type,
+          () => {
+            setStatus("idle");
+            maybeAutoListen();
+          }
+        );
+        if (audioEl) {
+          audioEl.addEventListener(
+            "ended",
+            () => {
+              setStatus("idle");
+              maybeAutoListen();
+            },
+            { once: true }
+          );
+        }
       } else {
         // No audio_chunk events arrived at all (e.g. TTS disabled, or
         // streaming unavailable and it went straight to one-shot) - play
         // whatever the final event carries, same as non-streaming mode.
-        playAudio(finalData.reply_audio, finalData.audio_content_type);
+        playAudio(finalData.reply_audio, finalData.audio_content_type, () => {
+          setStatus("idle");
+          maybeAutoListen();
+        });
       }
 
-      setStatus("idle");
     } catch (err) {
       console.error(err);
       setStatus("network error", true);
@@ -888,48 +798,63 @@
     setStatus("idle");
   });
 
-  // --- Optional voice input via the browser's Web Speech API ---
+  // --- Voice input via the browser's Web Speech API ---
   const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   const micBtn = $("mic-btn");
+  let recognition = null;
+  let listening = false;
+
+  function startListening() {
+    if (!Recognition || listening) return;
+    recognition = new Recognition();
+    recognition.lang = "en-US";
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    recognition.continuous = false;
+
+    recognition.onstart = () => {
+      listening = true;
+      micBtn.classList.add("listening");
+      setStatus("listening…");
+    };
+    recognition.onresult = (event) => {
+      const transcript = event.results[0][0].transcript;
+      $("text-input").value = transcript;
+    };
+    recognition.onerror = () => setStatus("mic error", true);
+    recognition.onend = () => {
+      listening = false;
+      micBtn.classList.remove("listening");
+      setStatus("idle");
+      const text = $("text-input").value.trim();
+      if (text) {
+        $("text-input").value = "";
+        sendCurrentMode(text);
+      }
+    };
+    recognition.start();
+  }
+
+  // Continuous mode: once a reply's audio (or lack of it) has fully
+  // finished, automatically start listening again - same "hit record once,
+  // it just keeps going" loop the real app's VoiceAssistantModal.tsx does
+  // via listenAndSend() after every turn.
+  function maybeAutoListen() {
+    if ($("continuous-mode").checked && Recognition) {
+      startListening();
+    }
+  }
+
   if (!Recognition) {
     micBtn.disabled = true;
     micBtn.title = "SpeechRecognition not supported in this browser";
   } else {
-    let recognition = null;
-    let listening = false;
-
     micBtn.addEventListener("click", () => {
       if (listening) {
         recognition && recognition.stop();
         return;
       }
-      recognition = new Recognition();
-      recognition.lang = "en-US";
-      recognition.interimResults = false;
-      recognition.maxAlternatives = 1;
-      recognition.continuous = false;
-
-      recognition.onstart = () => {
-        listening = true;
-        micBtn.classList.add("listening");
-        setStatus("listening…");
-      };
-      recognition.onresult = (event) => {
-        const transcript = event.results[0][0].transcript;
-        $("text-input").value = transcript;
-      };
-      recognition.onerror = () => setStatus("mic error", true);
-      recognition.onend = () => {
-        listening = false;
-        micBtn.classList.remove("listening");
-        setStatus("idle");
-        const text = $("text-input").value.trim();
-        if (text) {
-          $("text-input").value = "";
-          sendCurrentMode(text);
-        }
-      };
-      recognition.start();
+      startListening();
     });
   }
 
