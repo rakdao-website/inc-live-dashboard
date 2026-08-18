@@ -466,8 +466,9 @@ async def converse(request: ConverseRequest):
         session["booking_ready"] = False
 
     just_registered_now = session.get("registered", False) and not was_registered_before_this_turn
+    session_ended_now = action == "done"
 
-    if (just_registered_now or booking_ready_now) and request.session_id:
+    if (just_registered_now or booking_ready_now or session_ended_now) and request.session_id:
         await close_xai_tts_session(request.session_id)
 
     return {
@@ -475,7 +476,7 @@ async def converse(request: ConverseRequest):
         "reply_text": reply_text,
         "reply_audio": audio_b64,
         "audio_content_type": content_type,
-        "session_ended": False,
+        "session_ended": session_ended_now,
         "registered": session.get("registered", False),
         "just_registered": just_registered_now,
         "booking_ready": booking_ready_now,
@@ -592,20 +593,47 @@ async def converse_stream(request: ConverseRequest):
             f"registered={session.get('registered')} booking_active={session.get('booking_active')}: {reply_text!r}"
         )
 
-        # If the reply couldn't be (or wasn't) streamed above - overridden
-        # by business logic, or streaming TTS unavailable - synthesize it
-        # as one clip now so the visitor still hears something.
+        # The reply text is known now (whether or not it was overridden).
+        # If we can stream TTS, do so even for an overridden reply - the
+        # text itself is fixed, but audio playback can still start as soon
+        # as synthesis begins instead of waiting for the whole clip. Only
+        # fall back to a fully-buffered one-shot clip if streaming TTS
+        # isn't available at all, or the streamed attempt fails mid-way.
         final_audio_b64 = None
         final_content_type = None
-        if state["overridden"] or not streaming_tts_available:
+        if streaming_tts_available and state["overridden"]:
+            async def _single_chunk(text: str):
+                yield text
+
+            streamed_any = False
+            try:
+                async for audio_chunk in stream_synthesize_xai(_single_chunk(reply_text), session_id=request.session_id):
+                    if not audio_chunk:
+                        continue
+                    streamed_any = True
+                    content_type = (
+                        "audio/mpeg" if settings.xai_tts_codec == "mp3" else f"audio/{settings.xai_tts_codec}"
+                    )
+                    yield _sse({
+                        "type": "audio_chunk",
+                        "audio": base64.b64encode(audio_chunk).decode("utf-8"),
+                        "content_type": content_type,
+                    })
+            except Exception as tts_exc:
+                log_error(f"Streaming TTS for overridden reply failed, falling back to one-shot synthesis: {tts_exc}")
+
+            if not streamed_any:
+                final_audio_b64, final_content_type = await _try_synthesize(reply_text)
+        elif not streaming_tts_available:
             final_audio_b64, final_content_type = await _try_synthesize(reply_text)
 
         booking_ready_now = session.get("booking_ready", False)
         if booking_ready_now:
             session["booking_ready"] = False
         just_registered_now = session.get("registered", False) and not was_registered_before_this_turn
+        session_ended_now = action == "done"
 
-        if (just_registered_now or booking_ready_now) and request.session_id:
+        if (just_registered_now or booking_ready_now or session_ended_now) and request.session_id:
             # Conversation's wrapping up here - the frontend hands off and
             # closes the modal, so release the cached TTS connection now
             # instead of leaving it open until it eventually times out.
@@ -617,7 +645,7 @@ async def converse_stream(request: ConverseRequest):
             "reply_text": reply_text,
             "reply_audio": final_audio_b64,
             "audio_content_type": final_content_type,
-            "session_ended": False,
+            "session_ended": session_ended_now,
             "registered": session.get("registered", False),
             "just_registered": just_registered_now,
             "booking_ready": booking_ready_now,

@@ -306,6 +306,7 @@
       <span class="flag" data-flag="registered">registered</span>
       <span class="flag" data-flag="just_registered">just_registered</span>
       <span class="flag" data-flag="booking_ready">booking_ready</span>
+      <span class="flag" data-flag="session_ended">session_ended</span>
     </div>
   </section>
 </aside>
@@ -337,6 +338,7 @@
   const state = {
     sessionId: null,
     busy: false,
+    ended: false,
   };
 
   const log = $("log");
@@ -419,6 +421,7 @@
       const on = !!(data && data[key]);
       el.classList.toggle("on", on);
     });
+    state.ended = !!(data && (data.just_registered || data.booking_ready || data.session_ended));
   }
 
   function updateSessionDisplay() {
@@ -838,8 +841,11 @@
   // Continuous mode: once a reply's audio (or lack of it) has fully
   // finished, automatically start listening again - same "hit record once,
   // it just keeps going" loop the real app's VoiceAssistantModal.tsx does
-  // via listenAndSend() after every turn.
+  // via listenAndSend() after every turn. But if the conversation actually
+  // ended (registration/booking completed, or the visitor said they're
+  // done), stop instead of continuing to listen - same as the real app.
   function maybeAutoListen() {
+    if (state.ended) return;
     if ($("continuous-mode").checked && Recognition) {
       startListening();
     }

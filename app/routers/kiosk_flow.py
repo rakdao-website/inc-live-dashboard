@@ -260,6 +260,24 @@ def recognize_face(
         data=data.model_dump(),
     )
 
+@router.get("/visitor-by-phone")
+def get_visitor_by_phone(
+    mobile_number: str = Query(...),
+    db: Session = Depends(get_db),
+):
+    visitor = find_visitor_by_phone(db, mobile_number)
+ 
+    if visitor is None:
+        return not_found_response(
+            message="No visitor found with this phone number",
+            error_code="VISITOR_NOT_FOUND",
+        )
+ 
+    return success_response(
+        message="Visitor found",
+        data=visitor_payload(visitor),
+    )
+
 
 @router.post("/room-question")
 async def room_question(

@@ -1,6 +1,6 @@
 import json
 import os
-#from  app.openrouter import call_openrouter, stream_chat_completion as call_openrouter_stream
+from  app.openrouter import call_openrouter
 from app.voice_agent.xai_client import call_xai, stream_chat_completion as call_xai_stream
 from app.config import settings
 from app.voice_agent.utils.logger import log_error,log_info
@@ -40,12 +40,15 @@ Your job is to greet visitors, sign them in (log in an existing client or regist
 and then help with their request.
 
 **Step 1 - Greeting.**
-When the conversation starts, greet the visitor warmly and, in the same turn, ask for all of:
+When the conversation starts, greet the visitor warmly, briefly mention what you can help with
+(logging in or registering, answering questions about Innovation City, and booking a meeting room,
+podcast studio, or TikTok studio), and in the same turn ask for all of:
 - Their full name
 - Their email address
 - Whether they're an existing customer or not (phrase it plainly, e.g. "are you an existing customer, or is this your first time?" - they may offer a phone number here too, that's fine, take it)
-Ask for these together in one friendly sentence. If the visitor only gives some of it, only ask again
-for whatever's still missing - never re-ask for something already given.
+Ask for these together in one friendly sentence (or two, short ones) rather than a long speech. If the
+visitor only gives some of it, only ask again for whatever's still missing - never re-ask for
+something already given.
 
 **The "existing customer or not" question is mandatory and cannot be skipped.** Even if you already
 have the visitor's name and email, if you don't yet know whether they're an existing customer, your
@@ -88,6 +91,14 @@ action = "booking_intent" when the message is genuinely about booking (starting 
 room/date/time/duration details) - a vague or rhetorical "can I book a room?" without any real
 intent to do so right now can just be answered conversationally too (e.g. "Yes, want me to set one
 up?") if that reads more natural than diving straight into collecting details.
+
+**Wrapping up.** After finishing any action - answering a question, completing a login/registration,
+finishing a booking - ask if there's anything else you can help with (unless you already just asked
+and are waiting on their answer to that). If the visitor clearly indicates they're finished - "no
+that's all", "nothing else", "I'm good, thanks", "that's it" - respond with a warm, brief goodbye and
+set action = "done". This ends the conversation and stops listening, so only use it when they've
+clearly said they're finished, not just because they paused or gave a short answer - a vague or
+ambiguous reply should get a normal answer_question response, not "done".
 
 **Knowledge base - use this, and only this, for general questions about Innovation City**
 (opening hours, room availability, amenities, wifi, studios, company info, etc.):
@@ -138,7 +149,7 @@ User: "Hello"
 Assistant:
 {"action": "collect_name", "extracted": {}, "missing": ["name", "email", "visitor_type"]}
 ---REPLY---
-Welcome to Innovation City! Could I get your full name, your email, and let me know - are you an existing customer with us, or is this your first time?
+Welcome to Innovation City! I can help you log in or register, answer questions about the space, or book a meeting room, podcast studio, or TikTok studio. To get started, could I get your full name, your email, and let me know - are you an existing customer with us, or is this your first time?
 
 User: "Hi, my name is John Doe."
 Assistant:
@@ -211,6 +222,18 @@ Assistant:
 {"action": "answer_question", "extracted": {}, "missing": []}
 ---REPLY---
 We close at 12 PM and reopen 2 to 4 PM on Fridays. Whenever you're ready, how long did you want the room for?
+
+User: "What's the wifi password?" (a question with no ongoing booking/login)
+Assistant:
+{"action": "answer_question", "extracted": {}, "missing": []}
+---REPLY---
+WiFi is free, but you'll need to ask a reception associate for the password. Is there anything else I can help with?
+
+User: "No that's all, thanks!"
+Assistant:
+{"action": "done", "extracted": {}, "missing": []}
+---REPLY---
+You're welcome! Have a great day.
 
 Be concise, warm, and professional. Always follow the two-part output format exactly.
 """
@@ -288,8 +311,8 @@ async def get_next_response(transcript: str, session_data: dict) -> dict:
     try:
         if settings.conversation_provider == "xai":
             raw = await call_xai(full_prompt, system=system_prompt)
-        #else:
-            #raw = await call_openrouter(full_prompt, system=system_prompt)
+        else:
+            raw = await call_openrouter(full_prompt, system=system_prompt)
 
         header, reply_text = _split_header_and_reply(raw)
         data = {**header, "reply": reply_text}

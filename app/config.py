@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     xai_tts_model: str = ""
     xai_tts_voice: str = ""
 
+    openai_api_key: str = ""
+    openai_realtime_model: str = "gpt-realtime-2.1"
+    openai_realtime_voice: str = "marin"
+
+
+
     openrouter_api_key: str  = ""
     openrouter_stt_model: str = "openai/whisper-1"
     openrouter_model: str = "google/gemini-2.5-flash"
@@ -48,6 +54,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
 
 
 @lru_cache

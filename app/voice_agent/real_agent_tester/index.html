@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Realtime Agent Tester</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --panel-2: #1c2230;
+    --border: #2a3140;
+    --text: #e6e9ef;
+    --text-dim: #8b94a7;
+    --accent: #5b8def;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 32px;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .subtitle { color: var(--text-dim); font-size: 13px; margin: 0 0 20px; }
+  button {
+    padding: 10px 18px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    color: var(--text);
+    font-size: 14px;
+    cursor: pointer;
+    margin-right: 8px;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  #status {
+    font-family: "SF Mono", Consolas, monospace;
+    font-size: 12px;
+    color: var(--text-dim);
+    margin: 14px 0;
+  }
+  #transcript {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px;
+    max-width: 640px;
+    min-height: 240px;
+    max-height: 480px;
+    overflow-y: auto;
+    background: var(--panel);
+    white-space: pre-wrap;
+    font-size: 14px;
+    line-height: 1.7;
+  }
+  .msg-user { color: var(--accent); }
+  .msg-assistant { color: var(--text); }
+  .hint { color: var(--text-dim); font-size: 12px; margin-top: 10px; max-width: 640px; }
+</style>
+</head>
+<body>
+  <h1>Realtime Agent Tester</h1>
+  <p class="subtitle">Connects directly to OpenAI's Realtime API over WebRTC - no kiosk UI needed.</p>
+
+  <div>
+    <button id="connect-btn" class="primary">Connect &amp; start talking</button>
+    <button id="mute-btn" disabled>Mute</button>
+    <button id="disconnect-btn" disabled>Disconnect</button>
+  </div>
+
+  <div id="status">idle</div>
+  <div id="visitor-status" class="hint"></div>
+  <div id="transcript"></div>
+  <p class="hint">
+    Backend must be running at http://127.0.0.1:8000 with OPENAI_API_KEY set.
+    Once connected, just talk - voice activity detection handles turn-taking automatically.
+  </p>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
