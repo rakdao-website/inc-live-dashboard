@@ -58,11 +58,55 @@
   .msg-user { color: var(--accent); }
   .msg-assistant { color: var(--text); }
   .hint { color: var(--text-dim); font-size: 12px; margin-top: 10px; max-width: 640px; }
+  .sim-panel {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-bottom: 16px;
+    max-width: 640px;
+  }
+  .sim-panel label {
+    display: block;
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-top: 8px;
+  }
+  .sim-panel label:first-child { margin-top: 0; }
+  .sim-panel input, .sim-panel select {
+    width: 100%;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 8px;
+    border-radius: 6px;
+    font-size: 13px;
+    margin-top: 3px;
+  }
+  .sim-panel .checkbox-row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); }
+  .sim-panel .checkbox-row input { width: auto; margin: 0; }
 </style>
 </head>
 <body>
   <h1>Realtime Agent Tester</h1>
   <p class="subtitle">Connects directly to OpenAI's Realtime API over WebRTC - no kiosk UI needed.</p>
+
+  <div class="sim-panel">
+    <div class="checkbox-row">
+      <input type="checkbox" id="sim-visitor" />
+      <label for="sim-visitor" style="margin:0;">Simulate already-logged-in visitor (skips the greeting/collection questions)</label>
+    </div>
+    <div id="visitor-fields" style="display:none;">
+      <label for="visitor-id">visitor_id</label>
+      <input id="visitor-id" type="number" value="2" />
+      <label for="visitor-name">visitor_name</label>
+      <input id="visitor-name" type="text" value="Ayah" />
+      <label for="visitor-type">visitor_type</label>
+      <select id="visitor-type">
+        <option value="client">client (existing customer)</option>
+        <option value="visitor">visitor (new)</option>
+      </select>
+    </div>
+  </div>
 
   <div>
     <button id="connect-btn" class="primary">Connect &amp; start talking</button>

@@ -1,5 +1,12 @@
-import { RealtimeAgent, RealtimeSession, tool } from "@openai/agents/realtime";
+import { RealtimeAgent, RealtimeSession, OpenAIRealtimeWebSocket, tool } from "@openai/agents/realtime";
 import { z } from "zod";
+
+// PCM16 sample rate used throughout - both capture and playback contexts
+// are created at this rate to avoid needing to resample. NOTE: not
+// explicitly confirmed in the docs provided that the Realtime API expects
+// exactly 24kHz for pcm16 - if audio sounds pitched wrong, this is the
+// first thing to check against OpenAI's actual API reference.
+const PCM_SAMPLE_RATE = 24000;
 
 // Points at your FastAPI backend's ephemeral-token endpoint
 // (app/voice_agent/realtime_auth.py). Change if it runs elsewhere.
@@ -10,14 +17,22 @@ const transcriptEl = document.getElementById("transcript");
 const connectBtn = document.getElementById("connect-btn");
 const muteBtn = document.getElementById("mute-btn");
 const disconnectBtn = document.getElementById("disconnect-btn");
+const simVisitorCheckbox = document.getElementById("sim-visitor");
+const visitorFieldsEl = document.getElementById("visitor-fields");
+
+simVisitorCheckbox.addEventListener("change", () => {
+  visitorFieldsEl.style.display = simVisitorCheckbox.checked ? "block" : "none";
+});
 
 let session = null;
 let muted = false;
 
-// Set once lookup_visitor or register_visitor succeeds - later tools
-// (create_booking, Step 4) will read this via closure, same as
-// session["visitor_id"] does server-side in the text pipeline's
-// _run_business_logic.
+// Set once lookup_visitor or register_visitor succeeds (or pre-populated
+// at connect time when "Simulate already-logged-in visitor" is checked,
+// mirroring the text pipeline's visitor_id pre-authentication shortcut in
+// _prepare_session - skips the whole greeting/collection flow for a
+// visitor we already know, saving a real round of tokens and turns).
+// Tools read this via closure for create_booking etc.
 let currentVisitor = null;
 
 function setStatus(text) {
@@ -43,40 +58,150 @@ function appendToolLog(text) {
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
 }
 
-// response.done fires once the model finishes GENERATING a response, not
-// once the audio has actually finished PLAYING through the speakers -
-// those are two different moments, and the gap between them is why
-// unmuting right on response.done comes in too early. Since WebRTC handles
-// audio playback automatically (no direct "playback finished" event
-// exposed), the best available fix is estimating spoken duration from the
-// response's text length and delaying the unmute by that estimate.
-function estimateSpeechDurationMs(text) {
-  const FALLBACK_MS = 1500; // used if we can't extract any text at all
-  if (!text) return FALLBACK_MS;
-  const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
-  if (wordCount === 0) return FALLBACK_MS;
-  const WORDS_PER_SECOND = 2.3; // rough average conversational TTS pace
-  const SAFETY_BUFFER_MS = 500; // extra margin so we err toward unmuting late, not early
-  const MIN_MS = 900;
-  return Math.max(MIN_MS, (wordCount / WORDS_PER_SECOND) * 1000 + SAFETY_BUFFER_MS);
+function float32ToInt16(float32Array) {
+  const int16Array = new Int16Array(float32Array.length);
+  for (let i = 0; i < float32Array.length; i++) {
+    const s = Math.max(-1, Math.min(1, float32Array[i]));
+    int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return int16Array;
 }
 
-// Defensive extraction - the exact response.done payload shape wasn't
-// confirmed in the docs provided. Tries the standard OpenAI Realtime API
-// response object shape (response.output[].content[].transcript/text);
-// falls back to an empty string (triggering the flat fallback delay above)
-// if this doesn't match what actually comes through.
-function extractResponseText(event) {
-  try {
-    const outputs = event?.response?.output ?? [];
-    return outputs
-      .flatMap((item) => item?.content ?? [])
-      .map((c) => c?.transcript || c?.text || "")
-      .filter(Boolean)
-      .join(" ");
-  } catch {
-    return "";
+function int16ToFloat32(int16Array) {
+  const float32Array = new Float32Array(int16Array.length);
+  for (let i = 0; i < int16Array.length; i++) {
+    const s = int16Array[i];
+    float32Array[i] = s < 0 ? s / 0x8000 : s / 0x7fff;
   }
+  return float32Array;
+}
+
+// --- Mic capture (replaces WebRTC's automatic capture) ---------------
+// micEnabled replaces session.mute(), which doesn't exist for the
+// WebSocket transport at all - gates whether captured audio actually gets
+// sent anywhere, without touching the underlying getUserMedia stream.
+let micEnabled = false;
+let micAudioContext = null;
+let micStream = null;
+
+async function setupMicCapture(activeSession) {
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  });
+  micAudioContext = new AudioContext({ sampleRate: PCM_SAMPLE_RATE });
+  await micAudioContext.audioWorklet.addModule("/pcm-recorder-worklet.js");
+
+  const micSource = micAudioContext.createMediaStreamSource(micStream);
+  const workletNode = new AudioWorkletNode(micAudioContext, "pcm-recorder-processor");
+
+  workletNode.port.onmessage = (event) => {
+    if (!micEnabled) return; // muted - don't send anything anywhere
+    const int16 = float32ToInt16(event.data);
+    // NOTE: sendAudio's exact expected argument type (ArrayBuffer vs a
+    // wrapped object) wasn't confirmed in the docs provided - this passes
+    // the raw ArrayBuffer per the one example shown (`new ArrayBuffer(0)`).
+    activeSession.sendAudio(int16.buffer);
+  };
+
+  // Deliberately NOT connecting workletNode to micAudioContext.destination -
+  // we don't want to hear our own mic played back locally.
+  micSource.connect(workletNode);
+}
+
+function teardownMicCapture() {
+  if (micStream) {
+    micStream.getTracks().forEach((t) => t.stop());
+    micStream = null;
+  }
+  if (micAudioContext) {
+    micAudioContext.close().catch(() => {});
+    micAudioContext = null;
+  }
+}
+
+// --- Playback (replaces WebRTC's automatic playback) ------------------
+// Schedules each incoming PCM16 chunk back-to-back via the Web Audio API.
+//
+// Tracked PER RESPONSE (keyed by responseId, which every 'audio' event
+// already carries) rather than with one shared counter - responses can
+// overlap in practice (e.g. a tool-call follow-up response starting to
+// generate/play before the previous response's trailing chunks have
+// finished), and a single global counter has no way to tell those apart,
+// which was causing the "finished" signal to fire against the wrong
+// response's chunk count entirely.
+let playbackAudioContext = null;
+let nextPlayTime = 0;
+const responseAudioState = new Map(); // responseId -> { pending: number, done: boolean }
+
+function getResponseState(responseId) {
+  const key = responseId ?? "__unknown__";
+  if (!responseAudioState.has(key)) {
+    responseAudioState.set(key, { pending: 0, done: false });
+  }
+  return responseAudioState.get(key);
+}
+
+// True only once every response we're currently tracking has both been
+// marked done (response.done fired for it) AND finished playing all its
+// chunks - this is what actually tells us it's safe to unmute, regardless
+// of how many responses overlapped.
+function allResponsesFinished() {
+  for (const state of responseAudioState.values()) {
+    if (!state.done || state.pending > 0) return false;
+  }
+  return true;
+}
+
+function setupPlayback() {
+  playbackAudioContext = new AudioContext({ sampleRate: PCM_SAMPLE_RATE });
+  nextPlayTime = playbackAudioContext.currentTime;
+}
+
+function playPCM16Chunk(arrayBuffer, responseId) {
+  if (!playbackAudioContext) return;
+  const int16 = new Int16Array(arrayBuffer);
+  const float32 = int16ToFloat32(int16);
+
+  const audioBuffer = playbackAudioContext.createBuffer(1, float32.length, PCM_SAMPLE_RATE);
+  audioBuffer.copyToChannel(float32, 0);
+
+  const source = playbackAudioContext.createBufferSource();
+  source.buffer = audioBuffer;
+  source.connect(playbackAudioContext.destination);
+
+  const startAt = Math.max(nextPlayTime, playbackAudioContext.currentTime);
+  source.start(startAt);
+  nextPlayTime = startAt + audioBuffer.duration;
+
+  const state = getResponseState(responseId);
+  state.pending++;
+  console.log(
+    `[playback] scheduled chunk for ${responseId} - pending(this response)=${state.pending}, ` +
+    `startAt=${startAt.toFixed(2)}, duration=${audioBuffer.duration.toFixed(2)}s, done=${state.done}`
+  );
+  source.onended = () => {
+    state.pending = Math.max(0, state.pending - 1);
+    console.log(`[playback] chunk ended for ${responseId} - pending(this response)=${state.pending}, done=${state.done}`);
+    if (allResponsesFinished()) {
+      onPlaybackFullyFinished();
+    }
+  };
+}
+
+// Set by the response.created/response.done handlers below - only treat
+// "all scheduled chunks finished" as "the assistant is done talking" while
+// we're actually expecting a response; avoids acting on stray leftover
+// chunks finishing after a disconnect, etc.
+let awaitingPlaybackFinish = false;
+
+function onPlaybackFullyFinished() {
+  if (!awaitingPlaybackFinish) return;
+  awaitingPlaybackFinish = false;
+  responseAudioState.clear(); // done with this exchange - start fresh for the next one
+  micEnabled = true;
+  muted = false;
+  muteBtn.textContent = "Mute";
+  setStatus("connected - your turn to talk");
 }
 
 function updateVisitorStatus() {
@@ -305,72 +430,62 @@ async function fetchKnowledgeBase() {
 // Step 3 instructions: now includes the login/register flow using the
 // tools above. Still a placeholder for the real knowledge_base.md content
 // and still no booking (Step 4).
-function buildInstructions(knowledgeBase) {
+function buildInstructions(knowledgeBase, knownVisitor) {
   const today = new Date().toISOString().slice(0, 10);
+
+  const greetingSection = knownVisitor
+    ? `**Greeting.** ${knownVisitor.visitor_name} is ALREADY signed in (${knownVisitor.visitor_type === "client" ? "existing customer" : "new visitor"}) - do NOT ask for their name, email, phone, or customer status, you already have all of it. Just greet them warmly by name and ask how you can help.`
+    : `**Greeting.** Greet the visitor warmly, briefly mention what you can help with (logging in or
+registering, answering questions about Innovation City, and booking a meeting room, podcast
+studio, or TikTok studio), and ask for their full name, their email, and whether they're an
+existing customer or not. Ask together, not one at a time - only re-ask whatever's still missing.`;
+
+  const signInSection = knownVisitor
+    ? "" // already signed in - nothing to collect, so this whole section is just omitted (saves tokens every turn)
+    : `
+**Phone numbers are easy to mishear.** Read the phone number back to confirm before calling
+lookup_visitor or register_visitor - same format they gave it in (digit-by-digit if that's how they
+said it, not reformatted). Only call the tool once confirmed; if wrong, re-listen and confirm again.
+
+**Signing them in, once you know if they're an existing customer:**
+- Existing customer -> just their phone number (lookup works by phone alone). Found -> greet by
+  name, logged in. Not found -> apologize, register instead (visitor_type "visitor", need full name too).
+- Not existing -> full name + phone (email optional). register_visitor with visitor_type "visitor".
+  Conflict (phone already registered) -> call lookup_visitor instead.
+
+Don't retry lookup_visitor/register_visitor with the same info - wait for something new first.
+`;
+
   return `
 You are a friendly voice assistant for Innovation City, a business hub in RAK. Your job is to
 greet visitors, sign them in (log in an existing customer or register a new visitor), answer
 questions, and help with bookings. Today's date is ${today}.
 
-**Greeting.** Greet the visitor warmly, briefly mention what you can help with (logging in or
-registering, answering questions about Innovation City, and booking a meeting room, podcast
-studio, or TikTok studio), and ask for their full name, their email, and whether they're an
-existing customer or not. Ask for these together rather than one at a time, but only ask again
-for whatever's still missing if they only give you part of it.
+${greetingSection}
 
-**Questions can come at any time.** No matter what you're in the middle of - collecting their name/
-email/phone, waiting on a phone number confirmation, or partway through a booking - if the visitor
-asks a genuine question, answer it right away using the knowledge base below. Never say you'll get
-to it later, and never ignore it to stay on script. Once you've answered, pick back up exactly where
-you left off (don't restart the greeting or re-ask for information you already have).
+**Questions can come at any time.** No matter what you're in the middle of, answer a genuine
+question right away using the knowledge base below - never defer it. Then pick back up exactly
+where you left off (don't restart the greeting or re-ask for info you already have).
+${signInSection}
+**Booking a room or service.** Once signed in, book via create_booking. You need:
+- Which room/service - if "a meeting room" without specifying, ask which (there are two:
+  meeting_room_1/meeting_room_2). Podcast/TikTok studio: only one each, don't ask which.
+- Date, time, and duration in minutes.
 
-**Phone numbers are easy to mishear.** After the visitor gives their phone number, read it back to
-confirm before calling lookup_visitor or register_visitor with it. Read it back the same way they
-said it - if they said it digit-by-digit ("zero-five-eight-one..."), read it back digit-by-digit
-too, not reformatted into groups - reformatting can itself introduce mistakes. Only call the tool
-once they've confirmed it's correct - if they say it's wrong, listen again and read the new version
-back too before proceeding. Never guess or "clean up" a number you're not confident you heard
-correctly - always confirm first.
+Gather whatever's missing across turns - don't demand everything at once. Call create_booking once
+you have all four. Must be signed in first. An unrelated question mid-booking gets answered
+normally - pick the booking back up after, no need to force them to finish first.
 
-**Signing them in, once you know if they're an existing customer:**
-- Existing customer -> you just need their phone number (not their name - lookup works by phone
-  alone). Once you have it, call lookup_visitor. If it comes back found, greet them by name and let
-  them know they're logged in, then ask how you can help. If it comes back not found, apologize
-  briefly and let them know you'll register them instead, then call register_visitor with
-  visitor_type "visitor" (you'll need their full name too in that case).
-- Not an existing customer -> you need their full name and phone number (email optional - use it if
-  they already gave it). Once you have both, call register_visitor with visitor_type "visitor". If
-  it comes back with a conflict (phone already registered), call lookup_visitor instead to log them in.
-
-Never call lookup_visitor or register_visitor again with the same information you already tried -
-wait for new information (a corrected name/phone, or a decision to register instead) before retrying.
-
-**Booking a room or service.** Once the visitor is signed in, you can book a meeting room, podcast
-studio, or TikTok studio using create_booking. You need:
-- Which room/service. If they just say "a meeting room" without saying which one, ask - there are
-  two (meeting_room_1 and meeting_room_2). If they ask for the podcast studio or TikTok studio,
-  there's only one of each - use podcast_studio / tiktok_studio directly, don't ask which.
-- The date and time they want it.
-- How long they need it, in minutes.
-
-Gather whatever's missing across as many turns as it takes - don't demand everything at once if
-they only mentioned some of it. Once you have all four, call create_booking. The visitor must be
-signed in first (see above) - if they ask to book before that, get them signed in, then come back
-to the booking.
-
-If they ask an unrelated question while in the middle of booking, just answer it normally - they
-can pick the booking back up afterward, there's no need to force them to finish first.
-
-**Knowledge base - use this, and only this, for general questions about Innovation City** (opening
-hours, room availability, amenities, wifi, studios, company info, etc.). If something isn't covered
-here, say you're not sure and suggest asking a reception associate, rather than guessing:
+**Knowledge base - use this, and only this, for general questions** (hours, rooms, amenities, wifi,
+studios, company info). If not covered here, say you're not sure and suggest reception:
 
 ${knowledgeBase}
 
-After signing someone in, completing a booking, or answering a question, ask if there's anything
-else you can help with. If they clearly say they're finished, thank them warmly and say goodbye.
+After completing a real task (signing in, finishing a booking), ask if there's anything else. For a
+plain question, just answer it - don't tack on "anything else?" every single time, that gets
+repetitive. Only say goodbye when they clearly say they're finished, never on your own.
 
-Be concise, warm, and professional.
+Be concise, warm, and professional. Keep answers short - a sentence or two, not a paragraph.
 `.trim();
 }
 
@@ -381,22 +496,37 @@ connectBtn.addEventListener("click", async () => {
   try {
     const knowledgeBase = await fetchKnowledgeBase();
 
+    // Pre-authenticate, same as the text pipeline's visitor_id shortcut in
+    // _prepare_session - if we already know who this is, skip the whole
+    // greeting/collection flow (and its token cost) entirely.
+    if (simVisitorCheckbox.checked) {
+      const visitorId = parseInt(document.getElementById("visitor-id").value, 10);
+      currentVisitor = {
+        visitor_id: Number.isNaN(visitorId) ? null : visitorId,
+        visitor_name: document.getElementById("visitor-name").value || "the visitor",
+        visitor_type: document.getElementById("visitor-type").value || "visitor",
+      };
+      updateVisitorStatus();
+    }
+
     setStatus("minting ephemeral token…");
 
     const agent = new RealtimeAgent({
       name: "Innovation City Assistant",
-      instructions: buildInstructions(knowledgeBase),
+      instructions: buildInstructions(knowledgeBase, currentVisitor),
       tools: [lookupVisitorTool, registerVisitorTool, createBookingTool],
     });
 
-    // NOTE: not passing an explicit `transport` here - per the docs,
-    // OpenAIRealtimeWebRTC is described as "the simplest browser path" and
-    // the browser examples don't show it being constructed explicitly, so
-    // it's assumed to be the default when RealtimeSession runs in a
-    // browser context. If audio doesn't work, this is the first thing to
-    // check - may need `transport: new OpenAIRealtimeWebRTC()` explicitly.
+    // Explicit WebSocket transport - we handle mic capture and audio
+    // playback ourselves (see setupMicCapture/setupPlayback/playPCM16Chunk
+    // above) instead of relying on WebRTC's automatic handling, which
+    // wasn't giving us reliable control over interruptions/mute timing.
+    // NOTE: passing `transport:` here as a constructor option wasn't
+    // explicitly shown in the docs provided for this exact case - if this
+    // errors, check the SDK's actual RealtimeSession constructor types.
     session = new RealtimeSession(agent, {
       model: "gpt-realtime-2.1",
+      transport: new OpenAIRealtimeWebSocket(),
       config: {
         outputModalities: ["audio"],
         audio: {
@@ -412,7 +542,17 @@ connectBtn.addEventListener("click", async () => {
               threshold: 0.6, // 0-1; higher = less sensitive to background noise
               prefixPaddingMs: 300, // audio kept before detected speech start
               silenceDurationMs: 600, // how long silence must last to end a turn
-              createResponse: true,
+              // false (not true): VAD still detects turns, but does NOT
+              // automatically generate a response on its own anymore. This
+              // was the actual cause of the model answering questions no
+              // one asked and chaining into an unprompted goodbye - VAD
+              // was auto-triggering new responses off ambiguous audio
+              // (background noise, brief blips) with no real user turn
+              // behind them. We now trigger response.create ourselves,
+              // only on a genuine input_audio_buffer.speech_stopped event
+              // (see below) - a real, controlled signal instead of an
+              // ambient one.
+              createResponse: false,
               // Background noise can no longer cut the assistant off at
               // all, even in the brief window between a response starting
               // and our own mute-on-response.created handler taking
@@ -509,8 +649,30 @@ connectBtn.addEventListener("click", async () => {
       setStatus("error - check browser console");
     });
 
+    // Raw PCM16 chunks from the model - schedule them ourselves via Web
+    // Audio instead of relying on WebRTC's automatic playback.
+    // NOTE: the exact field holding the audio bytes on this event wasn't
+    // confirmed in the docs provided (shown only as `TransportLayerAudio`)
+    // - tries a few likely field names, and logs the raw event once so we
+    // can see its real shape if none of them work.
+    let loggedAudioEventShape = false;
+    session.on("audio", (event) => {
+      const chunk = event?.data ?? event?.audio ?? event?.buffer ?? event?.chunk ?? event;
+      const usable = chunk instanceof ArrayBuffer || ArrayBuffer.isView(chunk);
+      if (!loggedAudioEventShape) {
+        loggedAudioEventShape = true;
+        console.log("Raw 'audio' event shape (first one only):", event, "keys:", event && Object.keys(event));
+        if (!usable) console.warn("None of the tried field names held a usable ArrayBuffer - check the logged shape above.");
+      }
+      if (usable) playPCM16Chunk(chunk instanceof ArrayBuffer ? chunk : chunk.buffer, event?.responseId);
+    });
+
     setStatus("connecting…");
     await session.connect({ apiKey: fetchEphemeralKey });
+
+    setStatus("setting up microphone…");
+    setupPlayback();
+    await setupMicCapture(session);
 
     setStatus("connected - greeting…");
     muteBtn.disabled = false;
@@ -520,13 +682,9 @@ connectBtn.addEventListener("click", async () => {
     // there's no gap where the visitor's speech (or background noise)
     // could be captured before the general per-response handler below
     // takes over.
-    try {
-      session.mute(true);
-      muted = true;
-      muteBtn.textContent = "Unmute";
-    } catch (err) {
-      console.error("Could not mute for greeting (transport may not support mute):", err);
-    }
+    micEnabled = false;
+    muted = true;
+    muteBtn.textContent = "Unmute";
 
     // Automatically mute the mic whenever the assistant is speaking, and
     // unmute once it's done - for EVERY turn, not just the greeting. This
@@ -542,33 +700,55 @@ connectBtn.addEventListener("click", async () => {
     // explicitly confirmed in the docs provided. If muting doesn't kick in
     // right as the assistant starts talking, log event.type here to find
     // the actual name your account/model version uses.
+    //
+    // Responses can genuinely overlap (e.g. a tool-call follow-up response
+    // starting before the previous response's trailing audio has finished
+    // playing) - so state is tracked per responseId (see responseAudioState
+    // above), not with one shared flag that a second response.created
+    // would incorrectly reset out from under the first.
     session.transport.on("*", (event) => {
       if (event?.type === "response.created") {
-        try {
-          session.mute(true);
-          muted = true;
-          muteBtn.textContent = "Unmute";
-          setStatus("assistant speaking…");
-        } catch (err) {
-          console.error("Could not mute for assistant response:", err);
-        }
+        const responseId = event?.response?.id;
+        micEnabled = false;
+        muted = true;
+        muteBtn.textContent = "Unmute";
+        setStatus("assistant speaking…");
+        awaitingPlaybackFinish = true;
+        getResponseState(responseId); // registers it as in-flight (done: false) without touching any other response already in progress
       } else if (event?.type === "response.done") {
-        const text = extractResponseText(event);
-        const delayMs = estimateSpeechDurationMs(text);
-        appendToolLog(
-          `response finished generating (${text ? text.split(/\s+/).length + " words" : "no text extracted"}) - ` +
-          `unmuting in ~${Math.round(delayMs)}ms to let audio finish playing`
-        );
-        setTimeout(() => {
-          try {
-            session.mute(false);
-            muted = false;
-            muteBtn.textContent = "Mute";
-            setStatus("connected - your turn to talk");
-          } catch (err) {
-            console.error("Could not unmute after assistant response:", err);
-          }
-        }, delayMs);
+        const responseId = event?.response?.id;
+        const state = getResponseState(responseId);
+        state.done = true;
+
+        // If every response we're tracking (this one and any others still
+        // in flight) has already finished playing all its chunks, we can
+        // unmute right now - the per-chunk onended handler catches the
+        // rest as chunks continue to finish naturally.
+        //
+        // No fallback timer here anymore - it was removed after testing
+        // showed it firing prematurely against overlapping/chained
+        // responses (each response.done armed its own independent timer,
+        // none of which re-checked the actual current state before
+        // firing, so a stale timer could force-unmute while other
+        // responses' audio was still genuinely playing). The precise
+        // tracking above (allResponsesFinished, driven by each chunk's
+        // real 'ended' event) has proven reliable on its own.
+        appendToolLog(`response ${responseId} finished generating (${state.pending} chunk(s) still playing for it)`);
+        if (allResponsesFinished()) {
+          onPlaybackFullyFinished();
+        }
+      } else if (event?.type === "input_audio_buffer.speech_stopped") {
+        // The genuine, controlled trigger replacing createResponse: true -
+        // VAD detected the visitor actually stopped talking, so NOW we ask
+        // for a response. This can only fire from real detected speech
+        // (we only send audio at all while micEnabled is true, i.e. while
+        // we're actually listening), not from ambient noise during a
+        // muted window - eliminating the unprompted-response chaining.
+        try {
+          session.transport.sendEvent({ type: "response.create" });
+        } catch (err) {
+          console.error("Could not trigger response after speech_stopped:", err);
+        }
       }
     });
 
@@ -601,17 +781,9 @@ connectBtn.addEventListener("click", async () => {
 muteBtn.addEventListener("click", () => {
   if (!session) return;
   muted = !muted;
-  try {
-    // NOTE: per the docs, mute()/muted are only implemented for some
-    // transports (not plain OpenAIRealtimeWebSocket) - if this throws on
-    // whatever transport ends up active, that's expected per the docs,
-    // not a bug in this file.
-    session.mute(muted);
-    muteBtn.textContent = muted ? "Unmute" : "Mute";
-    setStatus(muted ? "muted" : "connected - just start talking");
-  } catch (err) {
-    console.error("Mute not supported on this transport:", err);
-  }
+  micEnabled = !muted;
+  muteBtn.textContent = muted ? "Unmute" : "Mute";
+  setStatus(muted ? "muted" : "connected - just start talking");
 });
 
 disconnectBtn.addEventListener("click", () => {
@@ -620,6 +792,15 @@ disconnectBtn.addEventListener("click", () => {
   // provided - trying the most likely candidates defensively.
   session.close?.() ?? session.disconnect?.();
   session = null;
+  teardownMicCapture();
+  if (playbackAudioContext) {
+    playbackAudioContext.close().catch(() => {});
+    playbackAudioContext = null;
+  }
+  awaitingPlaybackFinish = false;
+  responseAudioState.clear();
+  currentVisitor = null;
+  updateVisitorStatus();
   setStatus("disconnected");
   connectBtn.disabled = false;
   muteBtn.disabled = true;
