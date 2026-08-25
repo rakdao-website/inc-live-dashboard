@@ -1,4 +1,4 @@
-import { RealtimeAgent, RealtimeSession, OpenAIRealtimeWebSocket, tool } from "@openai/agents/realtime";
+import { RealtimeAgent, RealtimeSession, OpenAIRealtimeWebSocket, tool, backgroundResult } from "@openai/agents/realtime";
 import { z } from "zod";
 
 // PCM16 sample rate used throughout - both capture and playback contexts
@@ -7,6 +7,14 @@ import { z } from "zod";
 // exactly 24kHz for pcm16 - if audio sounds pitched wrong, this is the
 // first thing to check against OpenAI's actual API reference.
 const PCM_SAMPLE_RATE = 24000;
+// With barge-in enabled, the mic stays live even while the assistant is
+// talking - which means its own voice bleeding back in (no headphones, or
+// imperfect echo cancellation) can trigger a spurious speech_started/
+// speech_stopped pair. A real utterance is essentially never this short,
+// so anything shorter gets treated as noise/echo and ignored rather than
+// triggering a reply to nothing (which is what "the assistant answers
+// itself / repeats its question" actually was).
+const MIN_REAL_SPEECH_MS = 400;
 
 // Points at your FastAPI backend's ephemeral-token endpoint
 // (app/voice_agent/realtime_auth.py). Change if it runs elsewhere.
@@ -34,6 +42,30 @@ let muted = false;
 // visitor we already know, saving a real round of tokens and turns).
 // Tools read this via closure for create_booking etc.
 let currentVisitor = null;
+
+// Set by endConversationTool once the visitor is truly finished (goodbye
+// said). Checked in onPlaybackFullyFinished to stop listening entirely
+// instead of unmuting for another turn - mirrors the text pipeline's
+// session_ended flag stopping the listen loop.
+let conversationEnded = false;
+
+// General fix for "gives 2 responses before the user has time to talk":
+// this app only ever asks for a response in two places - the manual
+// greeting trigger at connect, and the input_audio_buffer.speech_stopped
+// handler, on genuine detected speech. Any OTHER response.created event,
+// at any point in the conversation (not just at startup), means something
+// fired a response we never asked for - most likely the API's own
+// automatic turn-detection response landing alongside one of our manual
+// triggers. turnAwaitingUser tracks whether we're currently in a gap
+// where nothing has been legitimately requested yet; it's flipped to
+// false right before each of our own response.create calls, and back to
+// true once the mic reopens for the visitor's turn (see
+// resumeAfterAssistantAudio below). A response.created that arrives while
+// it's still true is unrequested and gets cancelled immediately - not
+// just pruned from history after the fact, which was too late to stop
+// the visitor actually hearing it.
+let turnAwaitingUser = true;
+const cancelledResponseIds = new Set();
 
 function setStatus(text) {
   statusEl.textContent = text;
@@ -133,6 +165,14 @@ let playbackAudioContext = null;
 let nextPlayTime = 0;
 const responseAudioState = new Map(); // responseId -> { pending: number, done: boolean }
 
+// Every currently-scheduled (not yet finished) AudioBufferSourceNode.
+// Needed for barge-in: the Web Audio API queues chunks ahead of time via
+// source.start(startAt), so a chunk can be "scheduled" well before it's
+// actually audible. Without tracking these, an audio_interrupted event
+// had no way to actually stop anything - it only updated the status text
+// while whatever was already queued kept right on playing underneath it.
+const scheduledSources = new Set();
+
 function getResponseState(responseId) {
   const key = responseId ?? "__unknown__";
   if (!responseAudioState.has(key)) {
@@ -175,17 +215,46 @@ function playPCM16Chunk(arrayBuffer, responseId) {
 
   const state = getResponseState(responseId);
   state.pending++;
+  scheduledSources.add(source);
   console.log(
     `[playback] scheduled chunk for ${responseId} - pending(this response)=${state.pending}, ` +
     `startAt=${startAt.toFixed(2)}, duration=${audioBuffer.duration.toFixed(2)}s, done=${state.done}`
   );
   source.onended = () => {
+    scheduledSources.delete(source);
     state.pending = Math.max(0, state.pending - 1);
     console.log(`[playback] chunk ended for ${responseId} - pending(this response)=${state.pending}, done=${state.done}`);
     if (allResponsesFinished()) {
       onPlaybackFullyFinished();
     }
   };
+}
+
+// Cuts off every chunk that's currently queued or playing, right now,
+// instead of letting already-scheduled Web Audio buffers run to
+// completion underneath an interruption. This is the actual fix for
+// "interrupting" previously just talking over whatever audio was already
+// queued - source.start(startAt) schedules ahead of time, so stopping the
+// *next* chunk from being scheduled isn't enough; the ones already queued
+// have to be stopped directly.
+function flushQueuedPlayback() {
+  for (const source of scheduledSources) {
+    // Clear onended first - we're cutting this chunk off deliberately, not
+    // letting it finish naturally, so we don't want the normal
+    // pending-count/allResponsesFinished bookkeeping to run for it (that's
+    // handled in bulk below instead).
+    source.onended = null;
+    try {
+      source.stop();
+    } catch {
+      // Already stopped or never started - fine either way.
+    }
+  }
+  scheduledSources.clear();
+  if (playbackAudioContext) {
+    nextPlayTime = playbackAudioContext.currentTime;
+  }
+  responseAudioState.clear();
 }
 
 // Set by the response.created/response.done handlers below - only treat
@@ -198,10 +267,33 @@ function onPlaybackFullyFinished() {
   if (!awaitingPlaybackFinish) return;
   awaitingPlaybackFinish = false;
   responseAudioState.clear(); // done with this exchange - start fresh for the next one
-  micEnabled = true;
-  muted = false;
-  muteBtn.textContent = "Mute";
-  setStatus("connected - your turn to talk");
+  resumeAfterAssistantAudio();
+}
+
+// Shared by both "assistant finished talking normally" and "assistant got
+// interrupted/cut off" - either way, the next thing that should happen is
+// the same: end the conversation for real if the goodbye already went out,
+// otherwise hand the turn back to the visitor.
+function resumeAfterAssistantAudio() {
+  if (conversationEnded) {
+    // The goodbye has now actually finished playing (not just been
+    // requested) - stop listening for good instead of reopening the mic
+    // for another turn. Mirrors the text pipeline's session_ended flag
+    // stopping the listen loop and handing off.
+    micEnabled = false;
+    appendToolLog("goodbye finished playing - stopping and disconnecting");
+    setStatus("conversation ended - mic stopped");
+    performDisconnect();
+    return;
+  }
+
+  // Barge-in: the mic was never turned off for this response in the first
+  // place (see the connect handler), so there's nothing to re-enable here
+  // - doing so unconditionally would incorrectly override a manual mute
+  // the visitor clicked mid-response. Only the turn-tracking and status
+  // text need resetting for the next turn.
+  turnAwaitingUser = true;
+  setStatus(muted ? "muted - assistant done talking" : "connected - your turn to talk");
 }
 
 function updateVisitorStatus() {
@@ -247,14 +339,15 @@ const lookupVisitorTool = tool({
   name: "lookup_visitor",
   description:
     "Look up an existing customer by phone number to log them in. Only call this once " +
-    "you have their phone number, and they've told you they're an existing customer.",
+    "you have their phone number, and they've told you they're an existing customer. Full " +
+    "name isn't collected for existing customers - omit it, don't ask for it just for this.",
   parameters: z.object({
-    full_name: z.string().describe("The visitor's full name, as given (used for context/logging only)"),
+    full_name: z.string().nullable().describe("The visitor's full name if you happen to have it, otherwise null - not collected for existing customers"),
     mobile_number: z.string().describe("The visitor's phone number, as given"),
   }),
   async execute({ full_name, mobile_number }) {
     const normalizedPhone = normalizePhoneForBackend(mobile_number);
-    appendToolLog(`lookup_visitor(${full_name}, ${mobile_number} -> ${normalizedPhone})`);
+    appendToolLog(`lookup_visitor(${full_name ?? "(no name given)"}, ${mobile_number} -> ${normalizedPhone})`);
     try {
       // Phone-only lookup (see kiosk_flow_visitor_by_phone_snippet.py) -
       // deliberately NOT matching on name too, since a voice-transcribed
@@ -285,14 +378,15 @@ const lookupVisitorTool = tool({
 const registerVisitorTool = tool({
   name: "register_visitor",
   description:
-    "Register a new visitor with their full name, phone number, visitor type, and " +
-    "optionally email. Only call this once you have their full name and phone number, " +
-    "and they've told you this is their first time / they're not an existing customer.",
+    "Register a new visitor with their full name, phone number, visitor type, and email. " +
+    "Only call this once you have all four - full name, whether they're a visitor or a " +
+    "client, their email, and their phone number - and they've told you this is their " +
+    "first time / they're not an existing customer.",
   parameters: z.object({
     full_name: z.string(),
     mobile_number: z.string(),
-    email: z.string().nullable().describe("Email address if they gave one, otherwise null"),
-    visitor_type: z.enum(["visitor", "client"]).describe("Almost always 'visitor' for a new registration"),
+    email: z.string().nullable().describe("Email address - always asked for directly; null only if they genuinely refuse to give one"),
+    visitor_type: z.enum(["visitor", "client"]).describe("Whichever they explicitly said when asked - don't default to one without asking"),
   }),
   async execute({ full_name, mobile_number, email, visitor_type }) {
     const normalizedPhone = normalizePhoneForBackend(mobile_number);
@@ -356,6 +450,72 @@ const ROOM_MAP = {
   tiktok_studio: { service_type: "tiktok_studio", zone_id: "TTS_1" },
 };
 
+// Display info for the visual room preview shown while booking (see
+// showRoomPreview below). NOTE: these image paths are placeholders -
+// point them at your actual room photos (e.g. served from your backend,
+// a CDN, or a local /public/images/rooms/ folder in this app).
+const ROOM_DISPLAY_INFO = {
+  meeting_room_1: { label: "Meeting Room 1", imageUrl: "public/images/meeting_rooms.jpg" },
+  meeting_room_2: { label: "Meeting Room 2", imageUrl: "public/images/meeting_rooms.jpg" },
+  podcast_studio: { label: "Podcast Studio", imageUrl: "public/images/podcast.jpg" },
+  tiktok_studio: { label: "TikTok Studio", imageUrl: "public/images/tiktok.png" },
+};
+
+// Lazily builds the preview UI the first time it's needed, so this app
+// doesn't require any changes to its HTML file - just inserts itself into
+// the page right above the transcript.
+let roomPreviewInitialized = false;
+function ensureRoomPreviewUI() {
+  if (roomPreviewInitialized) return;
+  roomPreviewInitialized = true;
+
+  const style = document.createElement("style");
+  style.textContent = `
+    #room-preview { display: none; margin: 0 0 16px; text-align: center; }
+    #room-preview img {
+      max-width: 100%;
+      max-height: 260px;
+      border-radius: 12px;
+      object-fit: cover;
+      opacity: 1;
+      transition: opacity 0.3s ease;
+    }
+    #room-preview-label { margin-top: 6px; font-size: 0.9em; color: #8b94a7; }
+  `;
+  document.head.appendChild(style);
+
+  const container = document.createElement("div");
+  container.id = "room-preview";
+  container.innerHTML = `<img id="room-preview-img" alt="" /><div id="room-preview-label"></div>`;
+  (transcriptEl.parentElement ?? document.body).insertBefore(container, transcriptEl);
+}
+
+// Crossfades to the given room's image - called both as soon as the
+// visitor settles on a room (via preview_room, see below) and again at
+// actual booking time, so the visual is shown even if the dedicated tool
+// call gets skipped for some reason.
+function showRoomPreview(room) {
+  const info = ROOM_DISPLAY_INFO[room];
+  if (!info) return;
+  ensureRoomPreviewUI();
+  const container = document.getElementById("room-preview");
+  const img = document.getElementById("room-preview-img");
+  const label = document.getElementById("room-preview-label");
+  container.style.display = "block";
+  img.style.opacity = "0";
+  window.setTimeout(() => {
+    img.src = info.imageUrl;
+    img.alt = info.label;
+    label.textContent = info.label;
+    img.style.opacity = "1";
+  }, 180); // lets the fade-out finish before swapping the image, so it reads as one continuous crossfade rather than a jump cut
+}
+
+function hideRoomPreview() {
+  const container = document.getElementById("room-preview");
+  if (container) container.style.display = "none";
+}
+
 const createBookingTool = tool({
   name: "create_booking",
   description:
@@ -372,6 +532,7 @@ const createBookingTool = tool({
   }),
   needsApproval: true,
   async execute({ room, date, time, duration_minutes }) {
+    showRoomPreview(room); // belt-and-suspenders - preview_room should normally have shown this already
     if (!currentVisitor) {
       appendToolLog("create_booking refused: no visitor signed in yet");
       return JSON.stringify({
@@ -415,6 +576,48 @@ const createBookingTool = tool({
   },
 });
 
+const previewRoomTool = tool({
+  name: "preview_room",
+  description:
+    "Show the visitor a picture of a room/service. Call this the MOMENT they mention or settle " +
+    "on which room they want - don't wait until you've also collected the date, time, or " +
+    "duration. Call it again if they change their mind about which room. Purely visual, doesn't " +
+    "affect the booking itself.",
+  parameters: z.object({
+    room: z
+      .enum(["meeting_room_1", "meeting_room_2", "podcast_studio", "tiktok_studio"])
+      .describe("Which room/service to show a picture of"),
+  }),
+  async execute({ room }) {
+    appendToolLog(`preview_room(${room})`);
+    showRoomPreview(room);
+    // Purely a client-side visual side effect - there's nothing for the
+    // model to react to, so suppress the automatic follow-up response
+    // the same way end_conversation does (see backgroundResult there).
+    return backgroundResult(JSON.stringify({ shown: true }));
+  },
+});
+
+const endConversationTool = tool({
+  name: "end_conversation",
+  description:
+    "Call this once the visitor has clearly said they're finished and you're saying (or have just " +
+    "said) your goodbye. This stops the assistant from listening for anything further - only call " +
+    "it when the conversation is genuinely over, never mid-conversation.",
+  parameters: z.object({}),
+  async execute() {
+    appendToolLog("end_conversation called - will stop listening once goodbye finishes playing");
+    conversationEnded = true;
+    // Every tool result normally triggers an automatic follow-up response
+    // from the model (that's what makes "Welcome back, X!" naturally follow
+    // lookup_visitor) - but here the goodbye has already been said, so that
+    // automatic follow-up would produce an extra, unwanted utterance right
+    // as the conversation is meant to be ending. backgroundResult()
+    // delivers the result to the model without triggering that follow-up.
+    return backgroundResult(JSON.stringify({ ended: true }));
+  },
+});
+
 async function fetchKnowledgeBase() {
   try {
     const res = await fetch(`${BACKEND_BASE_URL}/voice-agent/knowledge-base`);
@@ -437,8 +640,8 @@ function buildInstructions(knowledgeBase, knownVisitor) {
     ? `**Greeting.** ${knownVisitor.visitor_name} is ALREADY signed in (${knownVisitor.visitor_type === "client" ? "existing customer" : "new visitor"}) - do NOT ask for their name, email, phone, or customer status, you already have all of it. Just greet them warmly by name and ask how you can help.`
     : `**Greeting.** Greet the visitor warmly, briefly mention what you can help with (logging in or
 registering, answering questions about Innovation City, and booking a meeting room, podcast
-studio, or TikTok studio), and ask for their full name, their email, and whether they're an
-existing customer or not. Ask together, not one at a time - only re-ask whatever's still missing.`;
+studio, or TikTok studio), and ask ONLY whether they're an existing customer or new here - nothing
+else yet. What you ask next depends entirely on their answer (see below).`;
 
   const signInSection = knownVisitor
     ? "" // already signed in - nothing to collect, so this whole section is just omitted (saves tokens every turn)
@@ -448,9 +651,12 @@ lookup_visitor or register_visitor - same format they gave it in (digit-by-digit
 said it, not reformatted). Only call the tool once confirmed; if wrong, re-listen and confirm again.
 
 **Signing them in, once you know if they're an existing customer:**
-- Existing customer -> just their phone number (lookup works by phone alone). Found -> greet by
-  name, logged in. Not found -> apologize, register instead (visitor_type "visitor", need full name too).
-- Not existing -> full name + phone (email optional). register_visitor with visitor_type "visitor".
+- Existing customer -> ask ONLY for their phone number (nothing else - lookup works by phone
+  alone). Found -> greet by name, logged in. Not found -> apologize, explain there's no profile
+  under that number, and switch to the new-visitor flow below (you'll need their other details too).
+- New/not existing -> ask for all four together, not one at a time (only re-ask whatever's still
+  missing): full name, whether they're a visitor or a client, their email, and their phone number.
+  Then call register_visitor with visitor_type set to whichever they said.
   Conflict (phone already registered) -> call lookup_visitor instead.
 
 Don't retry lookup_visitor/register_visitor with the same info - wait for something new first.
@@ -472,6 +678,10 @@ ${signInSection}
   meeting_room_1/meeting_room_2). Podcast/TikTok studio: only one each, don't ask which.
 - Date, time, and duration in minutes.
 
+The moment the room/service choice is settled - even before you've collected date, time, or
+duration - call preview_room with it so the visitor sees a picture of it. Call it again if they
+switch to a different room.
+
 Gather whatever's missing across turns - don't demand everything at once. Call create_booking once
 you have all four. Must be signed in first. An unrelated question mid-booking gets answered
 normally - pick the booking back up after, no need to force them to finish first.
@@ -483,15 +693,33 @@ ${knowledgeBase}
 
 After completing a real task (signing in, finishing a booking), ask if there's anything else. For a
 plain question, just answer it - don't tack on "anything else?" every single time, that gets
-repetitive. Only say goodbye when they clearly say they're finished, never on your own.
+repetitive. Only say goodbye when they clearly say they're finished, never on your own - and when
+you do say goodbye, call end_conversation so listening actually stops.
 
-Be concise, warm, and professional. Keep answers short - a sentence or two, not a paragraph.
+**Keep every reply short - this is a voice conversation, not an essay.** One short sentence for most
+turns; two at most if you're relaying a list of facts they specifically asked for (like hours). Say
+the one thing that matters, then stop - don't add extra pleasantries. If you catch yourself about to
+say more than ~15-20 words, cut it down.
+
+The ONE exception is the very first greeting - that's the only time you mention what you can help
+with. Every reply after that should be short with no capability recap, even if they ask something
+unrelated to what you just discussed.
+
+For example, the first greeting can be: "Welcome to Innovation City! I can help you log in or
+register, answer questions, or book a room. Are you an existing customer, or is this your first
+time here?" - but every later reply should be as short as: "Working hours are 8 to 5,
+Monday through Thursday." Don't repeat the capability list again after the greeting.
+
+Be warm and professional, but brief - always.
 `.trim();
 }
 
 connectBtn.addEventListener("click", async () => {
   connectBtn.disabled = true;
   setStatus("loading knowledge base…");
+  conversationEnded = false;
+  turnAwaitingUser = true;
+  cancelledResponseIds.clear();
 
   try {
     const knowledgeBase = await fetchKnowledgeBase();
@@ -514,7 +742,7 @@ connectBtn.addEventListener("click", async () => {
     const agent = new RealtimeAgent({
       name: "Innovation City Assistant",
       instructions: buildInstructions(knowledgeBase, currentVisitor),
-      tools: [lookupVisitorTool, registerVisitorTool, createBookingTool],
+      tools: [lookupVisitorTool, registerVisitorTool, createBookingTool, previewRoomTool, endConversationTool],
     });
 
     // Explicit WebSocket transport - we handle mic capture and audio
@@ -529,6 +757,11 @@ connectBtn.addEventListener("click", async () => {
       transport: new OpenAIRealtimeWebSocket(),
       config: {
         outputModalities: ["audio"],
+        // Lower reasoning effort = shorter, more direct responses and less
+        // latency/token usage per the docs - gpt-realtime-2.1 supports this.
+        reasoning: {
+          effort: "low",
+        },
         audio: {
           input: {
             format: "pcm16",
@@ -553,14 +786,20 @@ connectBtn.addEventListener("click", async () => {
               // (see below) - a real, controlled signal instead of an
               // ambient one.
               createResponse: false,
-              // Background noise can no longer cut the assistant off at
-              // all, even in the brief window between a response starting
-              // and our own mute-on-response.created handler taking
-              // effect (or if session.mute() ever silently fails on a
-              // transport that doesn't support it) - this is the actual
-              // fix for noise interrupting playback, with the mute-cycle
-              // logic below as a second, redundant layer of protection.
-              interruptResponse: false,
+              // true (not false): the mic now stays live while the
+              // assistant talks (see the response.created/resumeAfter-
+              // AssistantAudio changes below) so the visitor can genuinely
+              // talk over it - that's the whole point of barge-in. This is
+              // what makes real interruption actually stop the assistant's
+              // audio server-side; audio_interrupted (already handled
+              // below) flushes whatever was still queued client-side. The
+              // risk this reintroduces - the assistant's own voice
+              // bleeding back into the mic and triggering a false
+              // "interruption" - is mitigated by echoCancellation on the
+              // mic stream (see setupMicCapture) plus the minimum-speech-
+              // duration debounce below, which ignores speech_stopped
+              // events too short to plausibly be a real utterance.
+              interruptResponse: true,
             },
           },
           output: { format: "pcm16" },
@@ -571,18 +810,8 @@ connectBtn.addEventListener("click", async () => {
     // Renders the live conversation transcript. Assistant text depends on
     // output_audio.transcript being available per the docs - it may lag
     // slightly behind the actual audio.
-    //
-    // Also detects and prunes a duplicate greeting: if more than one
-    // assistant message shows up before the visitor has said anything at
-    // all, that's two independent greetings firing (the manual trigger
-    // above and the API's own automatic turn-detection response both
-    // responding at session start) - keep only the first, and actually
-    // remove the extra one(s) from the real session history via
-    // updateHistory, not just from the on-screen transcript, so the model
-    // doesn't treat the duplicate as real conversation context either.
-    // NOTE: the exact field name for a history item's unique id wasn't
-    // confirmed in the docs provided - tries itemId then id defensively.
     let prunedDuplicateGreeting = false;
+    let speechStartedAt = null;
     session.on("history_updated", (history) => {
       if (!prunedDuplicateGreeting) {
         const firstUserIndex = history.findIndex((item) => item.type === "message" && item.role === "user");
@@ -617,7 +846,13 @@ connectBtn.addEventListener("click", async () => {
     });
 
     session.on("audio_interrupted", () => {
+      // Cut off every already-queued chunk immediately, rather than
+      // stopping the counting while stale audio keeps playing underneath.
+      flushQueuedPlayback();
+      awaitingPlaybackFinish = false;
+      appendToolLog("audio_interrupted - flushed queued playback");
       setStatus("interrupted - listening…");
+      resumeAfterAssistantAudio();
     });
 
     // create_booking has needsApproval: true, so it won't execute until
@@ -633,6 +868,18 @@ connectBtn.addEventListener("click", async () => {
       const toolName = approvalItem?.rawItem?.name ?? approvalItem?.name ?? "this action";
       const args = approvalItem?.rawItem?.arguments ?? approvalItem?.arguments ?? {};
       appendToolLog(`approval requested for ${toolName}: ${JSON.stringify(args)}`);
+
+      if (toolName === "create_booking") {
+        // Last-resort fallback so the visitor at least sees the room by
+        // the time they're asked to approve the booking, even if
+        // preview_room was never called earlier in the conversation.
+        try {
+          const parsedArgs = typeof args === "string" ? JSON.parse(args) : args;
+          if (parsedArgs?.room) showRoomPreview(parsedArgs.room);
+        } catch {
+          // Malformed args JSON - not fatal, the approval flow below still works fine without a preview.
+        }
+      }
 
       const approved = window.confirm(`Approve ${toolName}?\n\n${JSON.stringify(args, null, 2)}`);
       if (approved) {
@@ -657,6 +904,7 @@ connectBtn.addEventListener("click", async () => {
     // can see its real shape if none of them work.
     let loggedAudioEventShape = false;
     session.on("audio", (event) => {
+      if (cancelledResponseIds.has(event?.responseId)) return; // unrequested response - never let its audio reach the speakers
       const chunk = event?.data ?? event?.audio ?? event?.buffer ?? event?.chunk ?? event;
       const usable = chunk instanceof ArrayBuffer || ArrayBuffer.isView(chunk);
       if (!loggedAudioEventShape) {
@@ -678,28 +926,19 @@ connectBtn.addEventListener("click", async () => {
     muteBtn.disabled = false;
     disconnectBtn.disabled = false;
 
-    // Mute the mic right away, before the greeting is even requested, so
-    // there's no gap where the visitor's speech (or background noise)
-    // could be captured before the general per-response handler below
-    // takes over.
-    micEnabled = false;
-    muted = true;
-    muteBtn.textContent = "Unmute";
+    // Barge-in: the mic stays live from the moment we connect, including
+    // through the greeting and every response after it, so the visitor
+    // can genuinely talk over the assistant instead of being auto-muted
+    // while it speaks. The only things that turn the mic off now are the
+    // manual mute button and the conversation actually ending/
+    // disconnecting - never "the assistant happens to be talking".
+    micEnabled = true;
+    muted = false;
+    muteBtn.textContent = "Mute";
 
-    // Automatically mute the mic whenever the assistant is speaking, and
-    // unmute once it's done - for EVERY turn, not just the greeting. This
-    // is what actually prevents background noise (or audio bleeding back
-    // in from speakers if not on headphones) from being picked up as a
-    // false "interruption" mid-response. Trades away true talk-over-the-
-    // assistant barge-in for reliable, noise-proof turn-taking - the right
-    // tradeoff here since the reported problem is unwanted interruptions,
-    // not a desire to literally cut the assistant off mid-sentence.
-    //
     // NOTE: "response.created" / "response.done" are standard OpenAI
     // Realtime API event names marking a response starting/finishing - not
-    // explicitly confirmed in the docs provided. If muting doesn't kick in
-    // right as the assistant starts talking, log event.type here to find
-    // the actual name your account/model version uses.
+    // explicitly confirmed in the docs provided.
     //
     // Responses can genuinely overlap (e.g. a tool-call follow-up response
     // starting before the previous response's trailing audio has finished
@@ -709,9 +948,25 @@ connectBtn.addEventListener("click", async () => {
     session.transport.on("*", (event) => {
       if (event?.type === "response.created") {
         const responseId = event?.response?.id;
-        micEnabled = false;
-        muted = true;
-        muteBtn.textContent = "Unmute";
+
+        if (turnAwaitingUser) {
+          // Nothing has legitimately asked for a response right now (no
+          // manual greeting/speech_stopped trigger has fired since the mic
+          // last reopened) - this response is unrequested. Cancel it right
+          // now and mark it so the 'audio' handler below refuses to play
+          // any chunks that arrive for it (some may already be in flight
+          // over the network before the cancel lands).
+          appendToolLog(`unrequested response ${responseId} detected before the visitor's turn - cancelling it`);
+          cancelledResponseIds.add(responseId);
+          try {
+            session.transport.sendEvent({ type: "response.cancel", response_id: responseId });
+          } catch (err) {
+            console.error("Could not cancel unrequested response:", err);
+          }
+          getResponseState(responseId).done = true; // don't block allResponsesFinished() waiting on a response we just cancelled
+          return; // skip the awaitingPlaybackFinish setup below entirely for this one
+        }
+
         setStatus("assistant speaking…");
         awaitingPlaybackFinish = true;
         getResponseState(responseId); // registers it as in-flight (done: false) without touching any other response already in progress
@@ -737,13 +992,28 @@ connectBtn.addEventListener("click", async () => {
         if (allResponsesFinished()) {
           onPlaybackFullyFinished();
         }
+      } else if (event?.type === "input_audio_buffer.speech_started") {
+        speechStartedAt = performance.now();
       } else if (event?.type === "input_audio_buffer.speech_stopped") {
+        const durationMs = speechStartedAt === null ? Infinity : performance.now() - speechStartedAt;
+        speechStartedAt = null;
+        if (durationMs < MIN_REAL_SPEECH_MS) {
+          // Too short to plausibly be real speech - most likely the
+          // assistant's own audio bleeding back into the mic. Ignore it:
+          // don't request a response, and don't count this as the
+          // visitor's turn (turnAwaitingUser stays whatever it already
+          // was), so a genuine unrequested-response check further up
+          // stays accurate.
+          appendToolLog(`ignoring ${durationMs.toFixed(0)}ms speech blip (below ${MIN_REAL_SPEECH_MS}ms) - likely echo/noise, not a real turn`);
+          return;
+        }
+        turnAwaitingUser = false;
         // The genuine, controlled trigger replacing createResponse: true -
         // VAD detected the visitor actually stopped talking, so NOW we ask
-        // for a response. This can only fire from real detected speech
-        // (we only send audio at all while micEnabled is true, i.e. while
-        // we're actually listening), not from ambient noise during a
-        // muted window - eliminating the unprompted-response chaining.
+        // for a response. This can only fire from real detected speech -
+        // audio is always being sent while the mic is live (barge-in), but
+        // the duration check above filters out blips too short to be a
+        // real utterance.
         try {
           session.transport.sendEvent({ type: "response.create" });
         } catch (err) {
@@ -761,11 +1031,12 @@ connectBtn.addEventListener("click", async () => {
     //
     // NOTE: this can end up firing alongside the API's own automatic
     // turn-detection response at session start, producing two separate
-    // greetings. Rather than remove this (and risk losing the proactive
-    // greeting entirely, since it's unconfirmed whether automatic behavior
-    // alone reliably greets without it), the history_updated handler below
-    // detects and prunes an extra assistant turn that arrives before the
-    // visitor has said anything.
+    // greetings. The turnAwaitingUser guard above (in response.created)
+    // now cancels whichever one lands second, instead of relying only on
+    // the history_updated pruning below (which cleans up the model's
+    // context either way, but on its own was too late to stop the extra
+    // one from actually playing out loud).
+    turnAwaitingUser = false;
     try {
       session.transport.sendEvent({ type: "response.create" });
     } catch (err) {
@@ -786,11 +1057,10 @@ muteBtn.addEventListener("click", () => {
   setStatus(muted ? "muted" : "connected - just start talking");
 });
 
-disconnectBtn.addEventListener("click", () => {
-  if (!session) return;
+function performDisconnect() {
   // NOTE: exact disconnect method name wasn't confirmed in the docs
   // provided - trying the most likely candidates defensively.
-  session.close?.() ?? session.disconnect?.();
+  session?.close?.() ?? session?.disconnect?.();
   session = null;
   teardownMicCapture();
   if (playbackAudioContext) {
@@ -799,10 +1069,19 @@ disconnectBtn.addEventListener("click", () => {
   }
   awaitingPlaybackFinish = false;
   responseAudioState.clear();
+  scheduledSources.clear();
+  cancelledResponseIds.clear();
   currentVisitor = null;
+  conversationEnded = false;
+  hideRoomPreview();
   updateVisitorStatus();
-  setStatus("disconnected");
   connectBtn.disabled = false;
   muteBtn.disabled = true;
   disconnectBtn.disabled = true;
+}
+
+disconnectBtn.addEventListener("click", () => {
+  if (!session) return;
+  performDisconnect();
+  setStatus("disconnected");
 });
