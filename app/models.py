@@ -503,6 +503,41 @@ class ActivityFeed(Base):
     booking: Mapped[Optional[Booking]] = relationship(foreign_keys=[booking_id])
 
 
+class RecognitionEvent(Base):
+    """A single face-recognition attempt from a live camera worker.
+
+    Logged for every attempt (known or unknown) so admins can review who was
+    seen, when, on which camera, and with what confidence.
+    """
+
+    __tablename__ = "recognition_events"
+
+    recognition_event_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    visitor_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        ForeignKey("visitors.visitor_id"),
+        nullable=True,
+        index=True,
+    )
+    matched_name: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    camera_id: Mapped[str] = mapped_column(String(60), nullable=False)
+    confidence: Mapped[Optional[float]] = mapped_column(nullable=True)
+    recognized: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("FALSE"),
+    )
+    snapshot_path: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+        index=True,
+    )
+
+    visitor: Mapped[Optional["Visitor"]] = relationship()
+
+
 # ============================================================
 # Read-only view models
 # These map to PostgreSQL views from INC.session.sql.

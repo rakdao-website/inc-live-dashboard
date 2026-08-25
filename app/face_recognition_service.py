@@ -13,10 +13,14 @@ from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, Fi
 
 VENDOR_PATH = Path(__file__).with_name("vendor")
 
-# Similarity thresholds
-HIGH_CONFIDENCE_THRESHOLD = 0.70   # >= this: recognized automatically
-LOW_CONFIDENCE_THRESHOLD = 0.50    # 0.50-0.69: show as suggestions
-# < 0.50: not registered, ask to register
+# Single confidence cutoff:
+#   score >= MATCH_THRESHOLD -> "recognized" (automatic "Welcome back")
+#   score <  MATCH_THRESHOLD -> "not_registered" (including an empty
+#                                 gallery) -> the kiosk goes straight to
+#                                 FaceCheckID's top 3 web results instead of
+#                                 comparing this face against other enrolled
+#                                 visitors.
+MATCH_THRESHOLD = 0.60
 
 MODEL_NAME = "buffalo_l"
 PROVIDERS = ["CPUExecutionProvider"]
@@ -28,6 +32,8 @@ QDRANT_PORT = 6333
 QDRANT_COLLECTION = "face_embeddings"
 EMBEDDING_SIZE = 512
 
+THUMBNAIL_MAX_CHARS = 200_000  # keep payload reasonable
+
 
 class FaceRecognitionUnavailable(RuntimeError):
     pass
@@ -38,22 +44,19 @@ class FaceMatch:
     name: str | None
     score: float
     recognized: bool
+    photo_base64: str | None = None
 
 
 @dataclass(frozen=True)
 class FaceRecognitionResult:
-    status: str  # "recognized" | "suggestions" | "not_registered" | "no_face"
+    status: str  # "recognized" | "not_registered" | "no_face"
     best_match: FaceMatch | None
-    suggestions: list[FaceMatch]
+    suggestions: list[FaceMatch]  # always empty; kept for structural compatibility
     message: str
 
 
 class FaceDatabase:
-    def __init__(
-        self,
-        host: str = QDRANT_HOST,
-        port: int = QDRANT_PORT,
-    ):
+    def __init__(self, host: str = QDRANT_HOST, port: int = QDRANT_PORT):
         self.client = QdrantClient(host=host, port=port)
         self._ensure_collection()
 
@@ -83,23 +86,33 @@ class FaceDatabase:
             FaceMatch(
                 name=result.payload.get("name"),
                 score=float(result.score),
-                recognized=float(result.score) >= HIGH_CONFIDENCE_THRESHOLD,
+                recognized=float(result.score) >= MATCH_THRESHOLD,
+                photo_base64=result.payload.get("photo"),
             )
             for result in results
         ]
 
-    def replace_person(self, name: str, embeddings: list[Any]) -> None:
+    def replace_person(
+        self,
+        name: str,
+        embeddings: list[Any],
+        photo_base64: str | None = None,
+    ) -> None:
         self.client.delete(
             collection_name=QDRANT_COLLECTION,
             points_selector=Filter(
                 must=[FieldCondition(key="name", match=MatchValue(value=name))]
             ),
         )
+        payload = {"name": name}
+        if photo_base64 and len(photo_base64) <= THUMBNAIL_MAX_CHARS:
+            payload["photo"] = photo_base64
+
         points = [
             PointStruct(
                 id=abs(hash(f"{name}_{i}")) % (2**63),
                 vector=self.normalize(embedding).tolist(),
-                payload={"name": name},
+                payload=payload,
             )
             for i, embedding in enumerate(embeddings)
         ]
@@ -115,11 +128,9 @@ class FaceRecognitionService:
     def _face_app(self):
         if self._app is not None:
             return self._app
-
         with self._app_lock:
             if self._app is not None:
                 return self._app
-
             try:
                 if VENDOR_PATH.exists() and str(VENDOR_PATH) not in sys.path:
                     sys.path.insert(0, str(VENDOR_PATH))
@@ -159,7 +170,6 @@ class FaceRecognitionService:
         return frame
 
     def _embedding_from_image_safe(self, image_base64: str) -> np.ndarray | None:
-        """Returns the normalized embedding for the largest face, or None if no face found."""
         try:
             frame = self.decode_image_base64(image_base64)
             faces = self._face_app().get(frame)
@@ -183,7 +193,6 @@ class FaceRecognitionService:
         faces = self._face_app().get(frame)
         if not faces:
             return FaceMatch(name=None, score=-1.0, recognized=False)
-
         face = max(
             faces,
             key=lambda item: (item.bbox[2] - item.bbox[0]) * (item.bbox[3] - item.bbox[1]),
@@ -197,11 +206,11 @@ class FaceRecognitionService:
 
     def recognize_images_base64(self, images_base64: list[str]) -> FaceRecognitionResult:
         """
-        Recognizes a person from up to several photos taken at once (higher accuracy
-        via averaging embeddings). Applies three-tier confidence:
-          - score >= 0.70            -> recognized automatically
-          - 0.50 <= score < 0.70     -> return top matches as suggestions
-          - score < 0.50             -> not_registered
+        Two outcomes:
+          - score >= MATCH_THRESHOLD -> "recognized" (automatic "Welcome back")
+          - anything else (including an empty gallery) -> "not_registered",
+            which sends the kiosk straight to FaceCheckID's top 3 web results
+            instead of comparing this face against other enrolled visitors.
         """
         if not images_base64:
             raise ValueError("At least one face image is required for recognition.")
@@ -223,10 +232,10 @@ class FaceRecognitionService:
             )
 
         average_embedding = self.database.normalize(np.mean(embeddings, axis=0))
-        matches = self.database.match(average_embedding, top_k=3)
+        matches = self.database.match(average_embedding, top_k=1)
         best = matches[0] if matches else None
 
-        if best is not None and best.score >= HIGH_CONFIDENCE_THRESHOLD:
+        if best is not None and best.score >= MATCH_THRESHOLD:
             return FaceRecognitionResult(
                 status="recognized",
                 best_match=best,
@@ -234,20 +243,11 @@ class FaceRecognitionService:
                 message=f"Welcome back, {best.name}!",
             )
 
-        candidates = [match for match in matches if match.score >= LOW_CONFIDENCE_THRESHOLD]
-        if candidates:
-            return FaceRecognitionResult(
-                status="suggestions",
-                best_match=None,
-                suggestions=candidates,
-                message="We found some possible matches. Please confirm which one is you.",
-            )
-
         return FaceRecognitionResult(
             status="not_registered",
             best_match=None,
             suggestions=[],
-            message="We don't recognize you yet. Please register.",
+            message="We don't recognize you yet. Let's check for a web match.",
         )
 
     def enroll_images(self, name: str, images_base64: list[str]) -> int:
@@ -257,7 +257,9 @@ class FaceRecognitionService:
         ]
         if not embeddings:
             raise ValueError("At least one face image is required for enrollment.")
-        self.database.replace_person(name, embeddings)
+        # Use the first enrollment photo as the thumbnail shown in future suggestions.
+        thumbnail = images_base64[0] if images_base64 else None
+        self.database.replace_person(name, embeddings, photo_base64=thumbnail)
         return len(embeddings)
 
     def recognize_from_camera(self, camera_index: int = CAMERA_INDEX) -> FaceMatch:
@@ -272,11 +274,9 @@ class FaceRecognitionService:
         try:
             if not capture.isOpened():
                 raise FaceRecognitionUnavailable("Could not open the camera for face recognition.")
-
             ok, frame = capture.read()
             if not ok:
                 raise FaceRecognitionUnavailable("Could not read a frame from the camera.")
-
             return self.recognize_frame(frame)
         finally:
             capture.release()

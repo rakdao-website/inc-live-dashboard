@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.models import FaceEmbedding
 
-SIMILARITY_THRESHOLD = 0.50
+SIMILARITY_THRESHOLD = 0.60
 
 
 @dataclass(frozen=True)

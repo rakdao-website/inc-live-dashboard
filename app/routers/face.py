@@ -2,7 +2,8 @@
 
 Flow for POST /api/face/detect:
   1. Detect the largest face in the image and compute its embedding.
-  2. Match against the DB face gallery (face_embeddings table).
+  2. Match against the shared Qdrant face gallery (same store used by the
+     kiosk's recognize-face/face-profile endpoints).
   3. If it matches a known visitor -> return that visitor.
   4. If not -> save the crop, create an unknown_face_captures row, and run a
      reverse web search returning the top candidate matches for a human to review.
@@ -22,6 +23,7 @@ from sqlalchemy.orm import Session
 from app import face_gallery, face_web_search
 from app.database import get_db
 from app.face_recognition_service import (
+    FaceMatch,
     FaceRecognitionUnavailable,
     get_face_recognition_service,
 )
@@ -33,7 +35,7 @@ from app.face_schemas import (
 )
 from app.face_web_search import WebFaceSearchUnavailable
 from app.kiosk_flow_services import normalize_name, normalize_phone
-from app.models import FaceWebMatch, UnknownFaceCapture, Visitor
+from app.models import FaceWebMatch, RecognitionEvent, UnknownFaceCapture, Visitor
 
 router = APIRouter(prefix="/api/face", tags=["Face"])
 
@@ -72,14 +74,13 @@ def _save_capture_image(image_bytes: bytes) -> Path:
     return path
 
 
-def _resolve_visitor(db: Session, match: face_gallery.GalleryMatch) -> Visitor | None:
-    if match.visitor_id is not None:
-        return db.get(Visitor, match.visitor_id)
-    identifier = str(match.face_identifier or "").strip()
-    if not identifier:
+def _resolve_visitor_by_name(db: Session, name: str | None) -> Visitor | None:
+    """Find the visitor whose face_reference_id matches this Qdrant identifier."""
+    wanted = str(name or "").strip()
+    if not wanted:
         return None
     for visitor in db.query(Visitor).all():
-        if str(getattr(visitor, "face_reference_id", "") or "").strip() == identifier:
+        if str(getattr(visitor, "face_reference_id", "") or "").strip() == wanted:
             return visitor
     return None
 
@@ -135,11 +136,12 @@ def detect_face(payload: DetectFaceRequest, db: Session = Depends(get_db)):
         best_embedding = None
         best_bytes = None
         best_score = None
-        best_match = None
+        best_match: FaceMatch | None = None
         for image_base64 in images:
             image_bytes = _decode_base64(image_base64)
             embedding = service.embedding_from_image_base64(image_base64)
-            match = face_gallery.match_embedding(db, embedding)
+            matches = service.database.match(embedding, top_k=1)
+            match = matches[0] if matches else FaceMatch(name=None, score=-1.0, recognized=False)
             if best_score is None or match.score > best_score:
                 best_score = match.score
                 best_embedding = embedding
@@ -154,14 +156,14 @@ def detect_face(payload: DetectFaceRequest, db: Session = Depends(get_db)):
         return _bad_request(str(exc), "FACE_IMAGE_INVALID")
 
     if best_match is not None and best_match.recognized:
-        visitor = _resolve_visitor(db, best_match)
+        visitor = _resolve_visitor_by_name(db, best_match.name)
         return _success(
             "Face recognized",
             DetectFaceResponse(
                 recognized=True,
                 visitor_id=visitor.visitor_id if visitor else None,
                 matched_name=visitor.visitor_name if visitor else None,
-                face_identifier=best_match.face_identifier,
+                face_identifier=best_match.name,
                 confidence=best_match.score,
             ).model_dump(mode="json"),
         )
@@ -274,13 +276,8 @@ def link_capture(capture_id: int, payload: LinkCaptureRequest, db: Session = Dep
 
     identifier = f"visitor:{visitor.visitor_id}"
     if payload.enroll_face and capture.embedding:
-        face_gallery.replace_embeddings(
-            db,
-            face_identifier=identifier,
-            embeddings=[face_gallery.deserialize_embedding(capture.embedding)],
-            visitor_id=visitor.visitor_id,
-            source_images=[capture.image_path],
-        )
+        embedding_vector = face_gallery.deserialize_embedding(capture.embedding)
+        get_face_recognition_service().database.replace_person(identifier, [embedding_vector])
         visitor.face_reference_id = identifier
 
     capture.status = "linked"
@@ -306,3 +303,29 @@ def dismiss_capture(capture_id: int, db: Session = Depends(get_db)):
     capture.status = "dismissed"
     db.commit()
     return _success("Capture dismissed", {"capture_id": capture_id, "status": "dismissed"})
+
+
+@router.get("/recognition-events")
+def list_recognition_events(limit: int = 50, db: Session = Depends(get_db)):
+    events = (
+        db.query(RecognitionEvent)
+        .order_by(RecognitionEvent.occurred_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    return _success(
+        "Recognition events retrieved",
+        [
+            {
+                "recognition_event_id": event.recognition_event_id,
+                "visitor_id": event.visitor_id,
+                "matched_name": event.matched_name,
+                "camera_id": event.camera_id,
+                "confidence": event.confidence,
+                "recognized": event.recognized,
+                "occurred_at": event.occurred_at.isoformat(),
+            }
+            for event in events
+        ],
+    )

@@ -160,6 +160,15 @@ def test_recognize_face_matches_model_name_to_visitor(monkeypatch: pytest.Monkey
             assert image == "good-frame"
             return FaceMatch(name="John Smith", score=0.91, recognized=True)
 
+        def recognize_images_base64(self, images):
+            assert images == ["good-frame"]
+            return kiosk_flow.FaceRecognitionResult(
+                status="recognized",
+                best_match=FaceMatch(name="John Smith", score=0.91, recognized=True),
+                suggestions=[],
+                message="Welcome back, John Smith!",
+            )
+
     monkeypatch.setattr(kiosk_flow, "get_face_recognition_service", lambda: FakeRecognizer())
 
     response = recognize_face(RecognizeFaceRequest(image_base64="good-frame"), FakeSession([FakeVisitor()]))
@@ -174,7 +183,12 @@ def test_recognize_face_matches_enrolled_visitor_identifier(monkeypatch: pytest.
     class FakeRecognizer:
         def recognize_images_base64(self, images):
             assert images == ["weak-frame", "good-frame"]
-            return FaceMatch(name="visitor:7", score=0.88, recognized=True)
+            return kiosk_flow.FaceRecognitionResult(
+                status="recognized",
+                best_match=FaceMatch(name="visitor:7", score=0.88, recognized=True),
+                suggestions=[],
+                message="Welcome back, visitor:7!",
+            )
 
     monkeypatch.setattr(kiosk_flow, "get_face_recognition_service", lambda: FakeRecognizer())
 
@@ -191,8 +205,8 @@ def test_recognize_face_matches_enrolled_visitor_identifier(monkeypatch: pytest.
 
 def test_recognize_face_returns_json_error_for_unexpected_model_failure(monkeypatch: pytest.MonkeyPatch):
     class BrokenRecognizer:
-        def recognize_image_base64(self, image):
-            assert image == "bad-frame"
+        def recognize_images_base64(self, images):
+            assert images == ["bad-frame"]
             raise RuntimeError("model crashed")
 
     monkeypatch.setattr(kiosk_flow, "get_face_recognition_service", lambda: BrokenRecognizer())
