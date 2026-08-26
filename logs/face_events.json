@@ -1,0 +1,3 @@
+{"timestamp": "2026-08-03T11:12:42.230217", "event_type": "unknown_face_with_suggestions", "data": {"suggestions": [{"name": "Dima", "score": 0.64879405}]}}
+{"timestamp": "2026-08-03T11:21:00.862586", "event_type": "unknown_face_with_suggestions", "data": {"suggestions": [{"name": "Dima", "score": 0.61656487, "gender": null}, {"name": "visitor:6", "score": 0.13574153, "gender": null}]}}
+{"timestamp": "2026-08-03T11:44:16.435709", "event_type": "unknown_face_with_suggestions", "data": {"suggestions": [{"name": "Dima", "score": 0.66430146, "gender": null}]}}

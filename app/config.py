@@ -29,6 +29,17 @@ class Settings(BaseSettings):
 
 
 
+    # Reverse face web search for unknown visitors. Off by default; when a
+    # detected face doesn't match anyone in our gallery and this is enabled,
+    # we query the provider for the top public-web candidates for a human to
+    # review. Disabled or unconfigured just returns "no web matches".
+    face_web_search_enabled: bool = False
+    face_web_search_provider: str = "facecheck"
+    facecheck_api_token: str = ""
+    # Testing mode returns inaccurate results but does not consume credits.
+    face_web_search_testing_mode: bool = False
+    face_web_search_max_images: int = 3  # confirmed: multiple photos of the same person don't cost extra FaceCheck.ID credits
+    
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

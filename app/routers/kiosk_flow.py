@@ -1,4 +1,5 @@
 from datetime import date, datetime, time
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, status
@@ -8,10 +9,12 @@ from sqlalchemy import func
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app import face_unknown_capture
 from app.database import get_db
-from app.face_recognition_service import FaceRecognitionUnavailable, get_face_recognition_service
+from app.face_recognition_service import FaceRecognitionResult, FaceRecognitionUnavailable, get_face_recognition_service
 from app.kiosk_flow_schemas import (
     CreateFaceProfileRequest,
+    FaceCheckSuggestion,
     CreateProfileRequest,
     EventSelectionCreate,
     FacialConsentRequest,
@@ -59,6 +62,8 @@ from app.operating_hours import OPERATING_HOURS_MESSAGE, is_within_operating_hou
 
 
 router = APIRouter(prefix="/api/kiosk", tags=["Kiosk Flow"])
+
+logger = logging.getLogger("kiosk.recognize_face")
 
 
 def success_response(
@@ -203,11 +208,23 @@ def recognize_face(
     visitor = None
     matched_name = None
     confidence = None
+    capture_id = None
+    facecheck_suggestions_payload = None
+
+    logger.info(
+        "POST /api/kiosk/recognize-face called (simulate=%s, images=%d)",
+        bool(payload.simulate_mobile_number),
+        len(payload.images_base64 or ([payload.image_base64] if payload.image_base64 else [])),
+    )
 
     if payload.simulate_mobile_number:
         visitor = find_visitor_by_phone(db, payload.simulate_mobile_number)
     else:
-        if not payload.images_base64 and not payload.image_base64:
+        images = list(payload.images_base64 or [])
+        if payload.image_base64:
+            images.append(payload.image_base64)
+
+        if not images:
             return bad_request_response(
                 message="A browser camera image is required for face recognition.",
                 error_code="FACE_IMAGE_REQUIRED",
@@ -215,13 +232,7 @@ def recognize_face(
 
         try:
             recognizer = get_face_recognition_service()
-            match = (
-                recognizer.recognize_images_base64(payload.images_base64)
-                if payload.images_base64
-                else recognizer.recognize_image_base64(payload.image_base64)
-                if payload.image_base64
-                else None
-            )
+            result = recognizer.recognize_images_base64(images)
         except FaceRecognitionUnavailable as exc:
             return JSONResponse(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -244,16 +255,57 @@ def recognize_face(
                 ),
             )
 
-        matched_name = match.name
-        confidence = match.score
-        if match.recognized:
-            visitor = find_visitor_by_face_name(db, match.name)
+        if result.status == "recognized" and result.best_match:
+            matched_name = result.best_match.name
+            confidence = result.best_match.score
+            visitor = find_visitor_by_face_name(db, matched_name)
+        elif result.status == "not_registered":
+            # No confident gallery match at all -> ask FaceCheckID for its
+            # top 3 web candidates, so the kiosk can show "is this you?"
+            # before falling back to a brand-new registration. Wrapped
+            # defensively: a failure here (disk write, DB insert, FaceCheckID
+            # call) must never crash the whole recognition request -- it
+            # should just fall through to plain registration, same as if
+            # FaceCheckID were disabled.
+            try:
+                capture = face_unknown_capture.create_capture_with_web_search(
+                    db, images, run_web_search=True
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to create unknown face capture / run FaceCheckID search"
+                )
+                capture = None
+
+            if capture is not None:
+                capture_id = capture.capture_id
+                if capture.web_matches:
+                    facecheck_suggestions_payload = [
+                        FaceCheckSuggestion(
+                            rank=match.rank,
+                            source_url=match.source_url,
+                            score=match.score,
+                            thumbnail_base64=match.thumbnail_base64,
+                        )
+                        for match in capture.web_matches
+                    ]
+        # status == "no_face": everything stays None
+
+    logger.info(
+        "recognize-face result: recognized=%s visitor_id=%s capture_id=%s facecheck_matches=%d",
+        visitor is not None,
+        visitor.visitor_id if visitor else None,
+        capture_id,
+        len(facecheck_suggestions_payload or []),
+    )
 
     data = RecognizeFaceResponse(
         recognized=visitor is not None,
         visitor_id=visitor.visitor_id if visitor else None,
         matched_name=matched_name,
         confidence=confidence,
+        capture_id=capture_id,
+        facecheck_suggestions=facecheck_suggestions_payload,
     )
     return success_response(
         message="Face recognition completed",

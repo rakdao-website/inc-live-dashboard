@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>INC POC API Tester</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header class="top">
+    <div>
+      <h1>INC POC Tester</h1>
+      <p>Camera + face embeddings + voice room agent smoke test</p>
+    </div>
+    <div class="api-bar">
+      <label>API base
+        <input id="apiBase" type="text" value="" placeholder="http://127.0.0.1:8000" />
+      </label>
+      <button id="btnHealth" type="button">Check health</button>
+      <span id="healthBadge" class="badge">unknown</span>
+    </div>
+  </header>
+
+  <main class="grid">
+    <!-- FACE / CAMERA -->
+    <section class="card">
+      <h2>1. Camera + Face detect</h2>
+      <div class="video-wrap">
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="canvas" hidden></canvas>
+      </div>
+      <div class="row">
+        <button id="btnCamOn" type="button">Open camera</button>
+        <button id="btnCamOff" type="button" class="ghost">Stop camera</button>
+        <button id="btnSnap" type="button" class="primary">Snap + detect</button>
+        <label class="check">
+          <input id="runWebSearch" type="checkbox" />
+          Run web search if unknown
+        </label>
+      </div>
+      <img id="preview" alt="Last snap" class="preview" hidden />
+      <pre id="faceOut" class="out">Face result will appear here.</pre>
+    </section>
+
+    <!-- CAPTURES -->
+    <section class="card">
+      <h2>2. Unknown captures</h2>
+      <div class="row">
+        <button id="btnListCaptures" type="button">List captures</button>
+        <input id="captureId" type="number" placeholder="capture_id" min="1" />
+        <button id="btnGetCapture" type="button">Get one</button>
+        <button id="btnRerunWeb" type="button">Re-run web search</button>
+        <button id="btnDismiss" type="button" class="ghost">Dismiss</button>
+      </div>
+      <div class="row">
+        <input id="linkVisitorId" type="number" placeholder="visitor_id (optional)" />
+        <input id="linkName" type="text" placeholder="full name" />
+        <input id="linkPhone" type="text" placeholder="+9715..." />
+        <button id="btnLink" type="button" class="primary">Link capture</button>
+      </div>
+      <pre id="captureOut" class="out">Captures will appear here.</pre>
+    </section>
+
+    <!-- VOICE -->
+    <section class="card">
+      <h2>3. Voice room agent</h2>
+      <p class="hint">Uses browser speech recognition (Chrome). Or type a question.</p>
+      <textarea id="voiceQuestion" rows="2" placeholder="Tell me about Meeting Room 1"></textarea>
+      <div class="row">
+        <button id="btnListen" type="button">🎤 Listen</button>
+        <button id="btnAsk" type="button" class="primary">Ask room-question</button>
+        <button id="btnSpeak" type="button">Speak answer (/speak or browser)</button>
+      </div>
+      <div class="quick">
+        <button type="button" data-q="Tell me about Meeting Room 1">MR_1</button>
+        <button type="button" data-q="Tell me about the Podcast Studio">Podcast</button>
+        <button type="button" data-q="What rooms are available?">Available?</button>
+        <button type="button" data-q="List the rooms">List rooms</button>
+      </div>
+      <pre id="voiceOut" class="out">Voice result will appear here.</pre>
+    </section>
+
+    <!-- LOOKUP / BOOKING -->
+    <section class="card">
+      <h2>4. Lookup + visit + book</h2>
+      <div class="row">
+        <input id="fullName" type="text" value="Aisha Khan" />
+        <input id="mobile" type="text" value="+971501234567" />
+        <button id="btnLookup" type="button">Profile lookup</button>
+      </div>
+      <div class="row">
+        <input id="visitorId" type="number" placeholder="visitor_id" />
+        <button id="btnVisit" type="button">Create visit session</button>
+        <select id="serviceType">
+          <option value="meeting_room">meeting_room</option>
+          <option value="podcast_studio">podcast_studio</option>
+          <option value="tiktok_studio">tiktok_studio</option>
+        </select>
+        <input id="zoneId" type="text" value="MR_2" />
+        <input id="bookTime" type="time" value="14:00" />
+        <button id="btnBook" type="button" class="primary">Create booking</button>
+      </div>
+      <pre id="kioskOut" class="out">Lookup / visit / booking result here.</pre>
+    </section>
+
+    <!-- DASHBOARD -->
+    <section class="card">
+      <h2>5. Dashboard APIs</h2>
+      <div class="row">
+        <button id="btnZones" type="button">Zones</button>
+        <button id="btnBookings" type="button">Bookings</button>
+        <button id="btnEvents" type="button">Events</button>
+        <button id="btnHeader" type="button">Header</button>
+        <button id="btnFeed" type="button">Activity feed</button>
+      </div>
+      <pre id="dashOut" class="out">Dashboard data here.</pre>
+    </section>
+
+    <!-- LOG -->
+    <section class="card wide">
+      <h2>Request log</h2>
+      <pre id="log" class="out log">Ready.</pre>
+    </section>
+  </main>
+
+  <script src="./app.js"></script>
+</body>
+</html>

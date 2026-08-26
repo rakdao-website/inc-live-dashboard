@@ -27,11 +27,20 @@ class RecognizeFaceRequest(BaseModel):
     images_base64: Optional[list[str]] = Field(default=None, min_length=1, max_length=5)
 
 
+class FaceCheckSuggestion(BaseModel):
+    rank: int
+    source_url: str
+    score: Optional[float] = None
+    thumbnail_base64: Optional[str] = None
+
+
 class RecognizeFaceResponse(BaseModel):
     recognized: bool
     visitor_id: Optional[int] = None
     matched_name: Optional[str] = None
     confidence: Optional[float] = None
+    capture_id: Optional[int] = None
+    facecheck_suggestions: Optional[list[FaceCheckSuggestion]] = None
 
 
 class ProfileLookupRequest(BaseModel):

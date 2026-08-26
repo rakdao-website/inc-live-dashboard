@@ -1,20 +1,26 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 import threading
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.admin import admin_login, router as admin_router
 from app.config import settings
 from app.database import Base, SessionLocal, check_database_connection, engine
 from app.face_recognition_service import FaceRecognitionUnavailable, get_face_recognition_service
+from app.routers.face import router as face_router
 from app.routers.kiosk import router as kiosk_router
 from app.routers.kiosk_flow import router as kiosk_flow_router
 from app.schemas import AdminLoginRequest
 from app.seed import seed_sample_data
+
+FE_TEST_DIR = Path(__file__).resolve().parents[1] / "fe-test"
+
 from app.voice_agent.initiate import router as initiate_router
 from app.voice_agent.converse import router as converse_router
 from app.voice_agent.realtime_auth import router as realtime_auth_router
@@ -80,6 +86,7 @@ app.add_middleware(
         "http://127.0.0.1:3003",
         "http://localhost:8000",
         "http://127.0.0.1:8000",
+        "null",
         "http://localhost:5500",  # common "Live Server" VS Code extension port
         "http://127.0.0.1:5500",
         "http://localhost:5173",  # Vite's default dev server port (realtime agent tester)
@@ -219,6 +226,12 @@ def admin_auth_login(payload: AdminLoginRequest):
 app.include_router(kiosk_router)
 
 app.include_router(kiosk_flow_router)
+app.include_router(face_router)
+app.include_router(admin_router)
+
+# Local browser smoke tester: camera, face detect, voice room Q&A, bookings.
+if FE_TEST_DIR.is_dir():
+    app.mount("/fe-test", StaticFiles(directory=str(FE_TEST_DIR), html=True), name="fe-test")
 
 app.include_router(admin_router)
 
