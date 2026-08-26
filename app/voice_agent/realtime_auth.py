@@ -23,7 +23,7 @@ import httpx
 from fastapi import APIRouter, HTTPException
 
 from app.config import settings
-from app.voice_agent.conversation_agent import _load_knowledge_base
+from app.voice_agent.knowledge_base_loader import load_knowledge_base as _load_knowledge_base
 from app.voice_agent.utils.logger import log_error, log_info
 
 router = APIRouter()

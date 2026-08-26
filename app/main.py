@@ -18,12 +18,10 @@ from app.routers.kiosk import router as kiosk_router
 from app.routers.kiosk_flow import router as kiosk_flow_router
 from app.schemas import AdminLoginRequest
 from app.seed import seed_sample_data
+from app.voice_agent.realtime_auth import router as realtime_auth_router
 
 FE_TEST_DIR = Path(__file__).resolve().parents[1] / "fe-test"
 
-from app.voice_agent.initiate import router as initiate_router
-from app.voice_agent.converse import router as converse_router
-from app.voice_agent.realtime_auth import router as realtime_auth_router
 
 def success_response(
     message: str = "Request completed successfully",
@@ -234,11 +232,7 @@ if FE_TEST_DIR.is_dir():
     app.mount("/fe-test", StaticFiles(directory=str(FE_TEST_DIR), html=True), name="fe-test")
 
 app.include_router(admin_router)
-
-
-
-app.include_router(initiate_router, prefix="/voice-agent")
-
-app.include_router(converse_router, prefix="/voice-agent")
-
 app.include_router(realtime_auth_router, prefix="/voice-agent")
+
+
+
