@@ -147,6 +147,7 @@ class KioskEventRead(BaseModel):
 
 class RoomQuestionRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=300)
+    visitor_id: Optional[int] = None
 
 
 class RoomQuestionResponse(BaseModel):
@@ -156,6 +157,11 @@ class RoomQuestionResponse(BaseModel):
 
 class SpeakRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=1000)
+
+
+class ParseTranscriptRequest(BaseModel):
+    transcript: str = Field(..., min_length=1, max_length=500)
+    service_type: Optional[Literal["meeting_room", "podcast_studio", "tiktok_studio"]] = None
 
 
 class VisitSessionRead(BaseModel):

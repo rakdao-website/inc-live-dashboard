@@ -19,16 +19,15 @@ class Settings(BaseSettings):
     # "gemini" or "grok" and supply the matching key via .env to enable it.
     # Falls back to the scripted matcher automatically if the call fails.
     room_question_provider: str = "scripted"
-    gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.5-flash"
-    xai_api_key: str = ""
-    xai_model: str = "grok-3"
+    # Server-side text-to-speech. Off by default; the frontend falls back to
+    # the browser's built-in speech synthesis automatically when this is
+    # disabled or the call fails for any reason.
 
-    # Server-side text-to-speech (xAI TTS). Off by default; the frontend
-    # falls back to the browser's built-in speech synthesis automatically
-    # when this is disabled or the call fails for any reason.
-    tts_enabled: bool = False
-    xai_tts_voice: str = "eve"
+    openai_api_key: str = ""
+    openai_realtime_model: str = "gpt-realtime-2.1"
+    openai_realtime_voice: str = "marin"
+
+
 
     # Reverse face web search for unknown visitors. Off by default; when a
     # detected face doesn't match anyone in our gallery and this is enabled,
@@ -48,9 +47,12 @@ class Settings(BaseSettings):
     )
 
 
+
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
 
 
 settings = get_settings()
+
+

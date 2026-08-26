@@ -1,0 +1,867 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Voice Agent Tester</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --panel-2: #1c2230;
+    --border: #2a3140;
+    --text: #e6e9ef;
+    --text-dim: #8b94a7;
+    --accent: #5b8def;
+    --accent-dim: #2d3f5e;
+    --user-bubble: #24314a;
+    --assistant-bubble: #1c2230;
+    --ok: #4caf7d;
+    --warn: #e0a83c;
+    --mono: "SF Mono", "Cascadia Code", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  body {
+    display: grid;
+    grid-template-columns: 340px 1fr;
+    grid-template-rows: 100vh;
+  }
+  aside {
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    padding: 20px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  main {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+  }
+  h1 {
+    font-size: 15px;
+    letter-spacing: 0.02em;
+    margin: 0 0 2px;
+    color: var(--text);
+  }
+  h1 .dot { color: var(--accent); }
+  .subtitle {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin: 0 0 8px;
+  }
+  section.block {
+    border-top: 1px solid var(--border);
+    padding-top: 16px;
+  }
+  section.block:first-of-type { border-top: none; padding-top: 0; }
+  label {
+    display: block;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+    margin: 10px 0 4px;
+  }
+  label:first-child { margin-top: 0; }
+  input[type="text"], input[type="number"], select {
+    width: 100%;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 7px 9px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-family: inherit;
+  }
+  input:focus, select:focus, button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+  .checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 12px;
+    font-size: 13px;
+    color: var(--text);
+  }
+  .checkbox-row input { width: auto; }
+  button {
+    cursor: pointer;
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    color: var(--text);
+    padding: 7px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-family: inherit;
+  }
+  button:hover { border-color: var(--accent); }
+  button.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    font-weight: 600;
+  }
+  button.primary:hover { filter: brightness(1.08); }
+  button.danger:hover { border-color: #e0554c; color: #e0554c; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  .session-id {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    word-break: break-all;
+    margin-top: 8px;
+  }
+  .flags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 10px;
+  }
+  .flag {
+    font-size: 11px;
+    font-family: var(--mono);
+    padding: 3px 7px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+  }
+  .flag.on { color: var(--ok); border-color: var(--ok); }
+
+  header.topbar {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  header.topbar .status {
+    font-size: 12px;
+    color: var(--text-dim);
+    font-family: var(--mono);
+  }
+  header.topbar .status.error { color: #e0554c; }
+
+  #log {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .empty-state {
+    margin: auto;
+    text-align: center;
+    color: var(--text-dim);
+    max-width: 340px;
+  }
+  .msg { display: flex; flex-direction: column; max-width: 70%; }
+  .msg.user { align-self: flex-end; align-items: flex-end; }
+  .msg.assistant { align-self: flex-start; align-items: flex-start; }
+  .bubble {
+    padding: 10px 13px;
+    border-radius: 12px;
+    font-size: 14px;
+    white-space: pre-wrap;
+  }
+  .msg.user .bubble { background: var(--user-bubble); border-bottom-right-radius: 3px; }
+  .msg.assistant .bubble { background: var(--assistant-bubble); border-bottom-left-radius: 3px; border: 1px solid var(--border); }
+  .msg .meta {
+    font-size: 10.5px;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    margin-top: 4px;
+    padding: 0 3px;
+  }
+  .msg .meta button {
+    padding: 1px 6px;
+    font-size: 10.5px;
+    margin-left: 6px;
+  }
+  details.debug {
+    margin-top: 6px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    max-width: 100%;
+  }
+  details.debug summary { cursor: pointer; color: var(--accent); }
+  details.debug pre {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    padding: 8px;
+    border-radius: 6px;
+    overflow-x: auto;
+    margin: 6px 0 0;
+    max-width: 460px;
+  }
+
+  form#composer {
+    border-top: 1px solid var(--border);
+    padding: 14px 20px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  form#composer input[type="text"] { flex: 1; }
+  #mic-btn.listening {
+    background: #e0554c;
+    border-color: #e0554c;
+    color: #fff;
+    animation: pulse 1.2s infinite;
+  }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+</style>
+</head>
+<body>
+
+<aside>
+  <div>
+    <h1>Voice Agent Tester<span class="dot">.</span></h1>
+    <p class="subtitle">Talks directly to your local backend - no kiosk UI needed.</p>
+  </div>
+
+  <section class="block">
+    <label for="base-url">Backend base URL</label>
+    <input id="base-url" type="text" value="http://127.0.0.1:8000" />
+
+    <label for="endpoint-path">Endpoint path</label>
+    <input id="endpoint-path" type="text" value="/voice-agent/converse" />
+
+    <div class="checkbox-row">
+      <input type="checkbox" id="stream-mode" />
+      <label for="stream-mode" style="margin:0;">Use streaming endpoint (real-time audio)</label>
+    </div>
+    <div id="stream-fields" style="display:none;">
+      <label for="stream-endpoint-path">Streaming endpoint path</label>
+      <input id="stream-endpoint-path" type="text" value="/voice-agent/converse/stream" />
+      <div class="session-id" id="mse-support"></div>
+    </div>
+
+    <div class="session-id" id="session-display">session: (none yet)</div>
+    <div class="row" style="margin-top:10px;">
+      <button id="reset-btn">Reset session</button>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="checkbox-row">
+      <input type="checkbox" id="sim-visitor" />
+      <label for="sim-visitor" style="margin:0;">Simulate already-logged-in visitor</label>
+    </div>
+
+    <div id="visitor-fields" style="display:none;">
+      <label for="visitor-id">visitor_id</label>
+      <input id="visitor-id" type="number" value="2" />
+      <label for="visitor-name">visitor_name</label>
+      <input id="visitor-name" type="text" value="Ayah" />
+      <label for="visitor-type">visitor_type</label>
+      <select id="visitor-type">
+        <option value="client">client (existing customer)</option>
+        <option value="visitor">visitor (new)</option>
+      </select>
+    </div>
+
+    <label for="service-type">service_type (booking pages only)</label>
+    <select id="service-type">
+      <option value="">(none)</option>
+      <option value="meeting_room">meeting_room</option>
+      <option value="podcast_studio">podcast_studio</option>
+      <option value="tiktok_studio">tiktok_studio</option>
+    </select>
+  </section>
+
+  <section class="block">
+    <div class="checkbox-row">
+      <input type="checkbox" id="autoplay" checked />
+      <label for="autoplay" style="margin:0;">Auto-play reply audio</label>
+    </div>
+    <div class="checkbox-row">
+      <input type="checkbox" id="show-debug" />
+      <label for="show-debug" style="margin:0;">Show raw response per turn</label>
+    </div>
+    <div class="checkbox-row">
+      <input type="checkbox" id="continuous-mode" />
+      <label for="continuous-mode" style="margin:0;">Continuous conversation (auto-listen after each reply, like the real app)</label>
+    </div>
+  </section>
+
+  <section class="block">
+    <label style="margin-top:0;">Last response flags</label>
+    <div class="flags" id="flags">
+      <span class="flag" data-flag="registered">registered</span>
+      <span class="flag" data-flag="just_registered">just_registered</span>
+      <span class="flag" data-flag="booking_ready">booking_ready</span>
+    </div>
+  </section>
+</aside>
+
+<main>
+  <header class="topbar">
+    <strong>Conversation</strong>
+    <span class="status" id="status">idle</span>
+  </header>
+
+  <div id="log">
+    <div class="empty-state">
+      Send a message (or tap the mic) to start. The first message greets the
+      assistant just like opening the voice modal does - try "Hello".
+    </div>
+  </div>
+
+  <form id="composer">
+    <button type="button" id="mic-btn" title="Speak (Web Speech API)">🎤</button>
+    <input type="text" id="text-input" placeholder="Type a message… e.g. Hello" autocomplete="off" />
+    <button type="submit" class="primary" id="send-btn">Send</button>
+  </form>
+</main>
+
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+
+  const state = {
+    sessionId: null,
+    busy: false,
+  };
+
+  const log = $("log");
+  const statusEl = $("status");
+  const simVisitor = $("sim-visitor");
+  const visitorFields = $("visitor-fields");
+  const streamMode = $("stream-mode");
+  const streamFields = $("stream-fields");
+
+  simVisitor.addEventListener("change", () => {
+    visitorFields.style.display = simVisitor.checked ? "block" : "none";
+  });
+
+  streamMode.addEventListener("change", () => {
+    streamFields.style.display = streamMode.checked ? "block" : "none";
+  });
+
+  function clearEmptyState() {
+    const empty = log.querySelector(".empty-state");
+    if (empty) empty.remove();
+  }
+
+  function scrollToBottom() {
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function addMessage(role, text, meta) {
+    clearEmptyState();
+    const wrap = document.createElement("div");
+    wrap.className = "msg " + role;
+
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    bubble.textContent = text || "(empty)";
+    wrap.appendChild(bubble);
+
+    if (meta) {
+      const metaEl = document.createElement("div");
+      metaEl.className = "meta";
+      metaEl.textContent = meta;
+      wrap.appendChild(metaEl);
+    }
+
+    log.appendChild(wrap);
+    scrollToBottom();
+    return wrap;
+  }
+
+  function updateMessageBubble(wrap, text, meta) {
+    const bubble = wrap.querySelector(".bubble");
+    if (bubble) bubble.textContent = text || "(empty)";
+    let metaEl = wrap.querySelector(".meta");
+    if (meta) {
+      if (!metaEl) {
+        metaEl = document.createElement("div");
+        metaEl.className = "meta";
+        wrap.appendChild(metaEl);
+      }
+      metaEl.textContent = meta;
+    }
+    scrollToBottom();
+  }
+
+  function addDebugPanel(container, data) {
+    if (!$("show-debug").checked) return;
+    const details = document.createElement("details");
+    details.className = "debug";
+    const summary = document.createElement("summary");
+    summary.textContent = "raw response";
+    const pre = document.createElement("pre");
+    pre.textContent = JSON.stringify(data, null, 2);
+    details.appendChild(summary);
+    details.appendChild(pre);
+    container.appendChild(details);
+  }
+
+  function updateFlags(data) {
+    document.querySelectorAll(".flag").forEach((el) => {
+      const key = el.dataset.flag;
+      const on = !!(data && data[key]);
+      el.classList.toggle("on", on);
+    });
+  }
+
+  function updateSessionDisplay() {
+    $("session-display").textContent = "session: " + (state.sessionId || "(none yet)");
+  }
+
+  function setStatus(text, isError) {
+    statusEl.textContent = text;
+    statusEl.classList.toggle("error", !!isError);
+  }
+
+  function base64ToBytes(base64) {
+    const bin = atob(base64);
+    const arr = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    return arr;
+  }
+
+  function playAudio(base64, contentType, onFinished) {
+    if (!base64 || !$("autoplay").checked) {
+      onFinished?.();
+      return;
+    }
+    try {
+      const blob = new Blob([base64ToBytes(base64)], { type: contentType || "audio/mpeg" });
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audio.onended = () => {
+        URL.revokeObjectURL(url);
+        onFinished?.();
+      };
+      audio.onerror = () => {
+        URL.revokeObjectURL(url);
+        onFinished?.();
+      };
+      audio.play().catch(() => onFinished?.());
+    } catch (e) {
+      console.error("Failed to play reply audio:", e);
+      onFinished?.();
+    }
+  }
+
+  // --- Progressive playback via MediaSource Extensions, for the
+  // streaming endpoint's audio_chunk events. Falls back to buffering
+  // everything and playing one blob at the end if the browser can't
+  // append this mimetype to a MediaSource (MP3-over-MSE support varies).
+  class StreamingAudioPlayer {
+    constructor(mimeType) {
+      this.mimeType = mimeType;
+      this.queue = [];
+      this.sourceBuffer = null;
+      this.bufferedChunksForFallback = [];
+      this.supported = "MediaSource" in window && MediaSource.isTypeSupported(mimeType);
+      this.audioEl = new Audio();
+
+      if (this.supported) {
+        this.mediaSource = new MediaSource();
+        this.audioEl.src = URL.createObjectURL(this.mediaSource);
+        this.mediaSource.addEventListener(
+          "sourceopen",
+          () => {
+            try {
+              this.sourceBuffer = this.mediaSource.addSourceBuffer(this.mimeType);
+              this.sourceBuffer.addEventListener("updateend", () => this._pump());
+              this._pump();
+            } catch (e) {
+              console.error("addSourceBuffer failed, falling back:", e);
+              this.supported = false;
+            }
+          },
+          { once: true }
+        );
+        this.audioEl.play().catch(() => {
+          /* Autoplay may need a user gesture - the Send/mic tap counts as one in most browsers. */
+        });
+      }
+    }
+
+    push(bytes) {
+      if (this.supported) {
+        this.queue.push(bytes);
+        this._pump();
+      } else {
+        // MSE unsupported for this mimetype - just buffer for a one-shot
+        // blob playback once the stream ends.
+        this.bufferedChunksForFallback.push(bytes);
+      }
+    }
+
+    _pump() {
+      if (!this.sourceBuffer || this.sourceBuffer.updating || this.queue.length === 0) return;
+      const chunk = this.queue.shift();
+      try {
+        this.sourceBuffer.appendBuffer(chunk);
+      } catch (e) {
+        console.error("appendBuffer failed:", e);
+      }
+    }
+
+    // Call once the SSE stream ends. `oneShotFallbackBase64` is the
+    // server's one-shot audio (only present when nothing was actually
+    // streamed - e.g. a login/booking reply that got overridden after the
+    // LLM finished) - used only if no chunks were ever streamed. Returns
+    // the <audio> element actually playing (MSE path) so the caller can
+    // attach an 'ended' listener, or null if playback completion is
+    // already being handled internally (or there's nothing to play).
+    finish(oneShotFallbackBase64, oneShotFallbackContentType, onFinished) {
+      if (this.supported && this.mediaSource.readyState === "open") {
+        const tryEnd = () => {
+          if (this.queue.length === 0 && this.sourceBuffer && !this.sourceBuffer.updating) {
+            try {
+              this.mediaSource.endOfStream();
+            } catch (e) {
+              /* already ended or errored - fine to ignore */
+            }
+          } else {
+            setTimeout(tryEnd, 40);
+          }
+        };
+        tryEnd();
+        return this.audioEl;
+      }
+
+      if (oneShotFallbackBase64) {
+        playAudio(oneShotFallbackBase64, oneShotFallbackContentType, onFinished);
+      } else if (this.bufferedChunksForFallback.length) {
+        const blob = new Blob(this.bufferedChunksForFallback, { type: this.mimeType });
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.onended = () => {
+          URL.revokeObjectURL(url);
+          onFinished?.();
+        };
+        audio.play().catch(() => onFinished?.());
+      } else {
+        onFinished?.();
+      }
+      return null;
+    }
+  }
+
+  (function reportMseSupport() {
+    const el = $("mse-support");
+    if (!el) return;
+    const supported = "MediaSource" in window && MediaSource.isTypeSupported("audio/mpeg");
+    el.textContent = supported
+      ? "MediaSource + audio/mpeg: supported in this browser ✓"
+      : "MediaSource + audio/mpeg: NOT supported here - will fall back to buffer-then-play";
+  })();
+
+  async function sendMessage(text) {
+    if (!text || state.busy) return;
+    state.busy = true;
+    $("send-btn").disabled = true;
+    setStatus("sending…");
+
+    addMessage("user", text);
+
+    const baseUrl = $("base-url").value.replace(/\/$/, "");
+    const path = $("endpoint-path").value;
+
+    const payload = { message: text };
+    if (state.sessionId) payload.session_id = state.sessionId;
+
+    if (simVisitor.checked) {
+      const vid = parseInt($("visitor-id").value, 10);
+      if (!Number.isNaN(vid)) payload.visitor_id = vid;
+      payload.visitor_name = $("visitor-name").value || undefined;
+      payload.visitor_type = $("visitor-type").value || undefined;
+    }
+    const service = $("service-type").value;
+    if (service) payload.service_type = service;
+
+    try {
+      const res = await fetch(baseUrl + path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        setStatus("HTTP " + res.status, true);
+        addMessage("assistant", (data && (data.detail || data.reply_text)) || "Request failed.", "error");
+        return;
+      }
+
+      state.sessionId = data.session_id || state.sessionId;
+      updateSessionDisplay();
+      updateFlags(data);
+
+      const metaBits = [
+        data.step ? "action: " + data.step : null,
+        data.missing && data.missing.length ? "missing: " + data.missing.join(", ") : null,
+      ].filter(Boolean);
+
+      const wrap = addMessage("assistant", data.reply_text, metaBits.join(" · "));
+      addDebugPanel(wrap, data);
+
+      playAudio(data.reply_audio, data.audio_content_type, () => {
+        setStatus("idle");
+        maybeAutoListen();
+      });
+    } catch (err) {
+      console.error(err);
+      setStatus("network error", true);
+      addMessage("assistant", "Could not reach the backend. Is it running at " + baseUrl + "?", "error");
+    } finally {
+      state.busy = false;
+      $("send-btn").disabled = false;
+    }
+  }
+
+  async function sendMessageStreaming(text) {
+    if (!text || state.busy) return;
+    state.busy = true;
+    $("send-btn").disabled = true;
+    setStatus("connecting (stream)…");
+
+    addMessage("user", text);
+
+    const baseUrl = $("base-url").value.replace(/\/$/, "");
+    const path = $("stream-endpoint-path").value;
+
+    const payload = { message: text };
+    if (state.sessionId) payload.session_id = state.sessionId;
+    if (simVisitor.checked) {
+      const vid = parseInt($("visitor-id").value, 10);
+      if (!Number.isNaN(vid)) payload.visitor_id = vid;
+      payload.visitor_name = $("visitor-name").value || undefined;
+      payload.visitor_type = $("visitor-type").value || undefined;
+    }
+    const service = $("service-type").value;
+    if (service) payload.service_type = service;
+
+    let player = null;
+    let audioChunkCount = 0;
+    let assistantWrap = null;
+    let finalData = null;
+
+    try {
+      const res = await fetch(baseUrl + path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok || !res.body) {
+        setStatus("HTTP " + (res.status || "?"), true);
+        addMessage("assistant", "Streaming request failed.", "error");
+        return;
+      }
+
+      setStatus("streaming…");
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let sepIndex;
+        while ((sepIndex = buffer.indexOf("\n\n")) !== -1) {
+          const rawEvent = buffer.slice(0, sepIndex);
+          buffer = buffer.slice(sepIndex + 2);
+          const line = rawEvent.split("\n").find((l) => l.startsWith("data:"));
+          if (!line) continue;
+
+          let event;
+          try {
+            event = JSON.parse(line.slice(5).trim());
+          } catch {
+            continue;
+          }
+
+          if (event.type === "audio_chunk") {
+            if (!assistantWrap) {
+              assistantWrap = addMessage("assistant", "🔊 …", "streaming audio…");
+            }
+            if ($("autoplay").checked) {
+              if (!player) player = new StreamingAudioPlayer(event.content_type || "audio/mpeg");
+              player.push(base64ToBytes(event.audio));
+            }
+            audioChunkCount++;
+            if (assistantWrap) {
+              updateMessageBubble(assistantWrap, "🔊 …", `${audioChunkCount} audio chunk(s) received…`);
+            }
+          } else if (event.type === "final") {
+            finalData = event;
+          }
+        }
+      }
+
+      if (!finalData) {
+        const msg = "Stream ended without a final response.";
+        if (assistantWrap) updateMessageBubble(assistantWrap, msg, "error");
+        else addMessage("assistant", msg, "error");
+        return;
+      }
+
+      state.sessionId = finalData.session_id || state.sessionId;
+      updateSessionDisplay();
+      updateFlags(finalData);
+
+      const metaBits = [
+        finalData.step ? "action: " + finalData.step : null,
+        audioChunkCount > 0
+          ? audioChunkCount + " audio chunks streamed in real time"
+          : "no streamed audio - one-shot fallback clip",
+      ].filter(Boolean);
+
+      if (assistantWrap) {
+        updateMessageBubble(assistantWrap, finalData.reply_text, metaBits.join(" · "));
+      } else {
+        assistantWrap = addMessage("assistant", finalData.reply_text, metaBits.join(" · "));
+      }
+      addDebugPanel(assistantWrap, finalData);
+
+      if (player) {
+        const audioEl = player.finish(
+          audioChunkCount === 0 ? finalData.reply_audio : null,
+          finalData.audio_content_type,
+          () => {
+            setStatus("idle");
+            maybeAutoListen();
+          }
+        );
+        if (audioEl) {
+          audioEl.addEventListener(
+            "ended",
+            () => {
+              setStatus("idle");
+              maybeAutoListen();
+            },
+            { once: true }
+          );
+        }
+      } else {
+        // No audio_chunk events arrived at all (e.g. TTS disabled, or
+        // streaming unavailable and it went straight to one-shot) - play
+        // whatever the final event carries, same as non-streaming mode.
+        playAudio(finalData.reply_audio, finalData.audio_content_type, () => {
+          setStatus("idle");
+          maybeAutoListen();
+        });
+      }
+
+    } catch (err) {
+      console.error(err);
+      setStatus("network error", true);
+      addMessage("assistant", "Could not reach the backend (streaming). Is it running at " + baseUrl + "?", "error");
+    } finally {
+      state.busy = false;
+      $("send-btn").disabled = false;
+    }
+  }
+
+  function sendCurrentMode(text) {
+    return streamMode.checked ? sendMessageStreaming(text) : sendMessage(text);
+  }
+
+  $("composer").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const input = $("text-input");
+    const text = input.value.trim();
+    input.value = "";
+    sendCurrentMode(text);
+  });
+
+  $("reset-btn").addEventListener("click", () => {
+    state.sessionId = null;
+    updateSessionDisplay();
+    updateFlags({});
+    log.innerHTML = '<div class="empty-state">Session reset. Send a message to start a new conversation.</div>';
+    setStatus("idle");
+  });
+
+  // --- Voice input via the browser's Web Speech API ---
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const micBtn = $("mic-btn");
+  let recognition = null;
+  let listening = false;
+
+  function startListening() {
+    if (!Recognition || listening) return;
+    recognition = new Recognition();
+    recognition.lang = "en-US";
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    recognition.continuous = false;
+
+    recognition.onstart = () => {
+      listening = true;
+      micBtn.classList.add("listening");
+      setStatus("listening…");
+    };
+    recognition.onresult = (event) => {
+      const transcript = event.results[0][0].transcript;
+      $("text-input").value = transcript;
+    };
+    recognition.onerror = () => setStatus("mic error", true);
+    recognition.onend = () => {
+      listening = false;
+      micBtn.classList.remove("listening");
+      setStatus("idle");
+      const text = $("text-input").value.trim();
+      if (text) {
+        $("text-input").value = "";
+        sendCurrentMode(text);
+      }
+    };
+    recognition.start();
+  }
+
+  // Continuous mode: once a reply's audio (or lack of it) has fully
+  // finished, automatically start listening again - same "hit record once,
+  // it just keeps going" loop the real app's VoiceAssistantModal.tsx does
+  // via listenAndSend() after every turn.
+  function maybeAutoListen() {
+    if ($("continuous-mode").checked && Recognition) {
+      startListening();
+    }
+  }
+
+  if (!Recognition) {
+    micBtn.disabled = true;
+    micBtn.title = "SpeechRecognition not supported in this browser";
+  } else {
+    micBtn.addEventListener("click", () => {
+      if (listening) {
+        recognition && recognition.stop();
+        return;
+      }
+      startListening();
+    });
+  }
+
+  updateSessionDisplay();
+  updateFlags({});
+})();
+</script>
+
+</body>
+</html>

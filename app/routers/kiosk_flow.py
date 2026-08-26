@@ -30,11 +30,14 @@ from app.kiosk_flow_schemas import (
     RoomQuestionRequest,
     RoomQuestionResponse,
     SpeakRequest,
+    ParseTranscriptRequest,
     VisitSessionCreate,
     VisitSessionRead,
 )
 from app.room_question_service import answer_room_question
-from app.tts_service import TtsUnavailable, synthesize_speech
+from app.voice_agent.tts_service import TtsUnavailable, synthesize_speech
+from app.booking_intent_service import parse_booking_intent
+from app.registration_intent_service import parse_visitor_intent
 from app.kiosk_flow_services import (
     calculate_end_time,
     create_activity,
@@ -309,6 +312,25 @@ def recognize_face(
         data=data.model_dump(),
     )
 
+@router.get("/visitor-by-phone")
+def get_visitor_by_phone(
+    mobile_number: str = Query(...),
+    db: Session = Depends(get_db),
+):
+    visitor = find_visitor_by_phone(db, mobile_number)
+ 
+    if visitor is None:
+        return not_found_response(
+            message="No visitor found with this phone number",
+            error_code="VISITOR_NOT_FOUND",
+        )
+ 
+    return success_response(
+        message="Visitor found",
+        data=visitor_payload(visitor),
+    )
+
+
 @router.post("/room-question")
 async def room_question(
     payload: RoomQuestionRequest,
@@ -329,13 +351,25 @@ async def speak(payload: SpeakRequest):
     frontend catches it and falls back to the browser's own speech synthesis.
     """
     try:
-        audio_bytes = await synthesize_speech(payload.text)
+        audio_bytes, content_type = await synthesize_speech(payload.text)
     except TtsUnavailable as exc:
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content=error_response(str(exc), "TTS_UNAVAILABLE"),
         )
-    return Response(content=audio_bytes, media_type="audio/mpeg")
+    return Response(content=audio_bytes, media_type=content_type)
+
+
+@router.post("/parse-booking-intent")
+async def parse_booking_intent_route(payload: ParseTranscriptRequest, db: Session = Depends(get_db)):
+    result = await parse_booking_intent(db, payload.transcript, service_type=payload.service_type)
+    return success_response(message="Booking intent parsed", data=result.to_dict())
+
+
+@router.post("/parse-registration-intent")
+async def parse_registration_intent_route(payload: ParseTranscriptRequest):
+    result = await parse_visitor_intent(payload.transcript)
+    return success_response(message="Registration intent parsed", data=result.to_dict())
 
 
 @router.post("/profile-lookup")
