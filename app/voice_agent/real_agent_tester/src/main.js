@@ -455,16 +455,17 @@ const ROOM_MAP = {
 // point them at your actual room photos (e.g. served from your backend,
 // a CDN, or a local /public/images/rooms/ folder in this app).
 const ROOM_DISPLAY_INFO = {
-  meeting_room_1: { label: "Meeting Room 1", imageUrl: "public/images/meeting_rooms.jpg" },
-  meeting_room_2: { label: "Meeting Room 2", imageUrl: "public/images/meeting_rooms.jpg" },
-  podcast_studio: { label: "Podcast Studio", imageUrl: "public/images/podcast.jpg" },
-  tiktok_studio: { label: "TikTok Studio", imageUrl: "public/images/tiktok.png" },
+  meeting_room_1: { label: "Meeting Room 1", imageUrl: "/public/images/meeting_rooms.jpg" },
+  meeting_room_2: { label: "Meeting Room 2", imageUrl: "/public/images/meeting_rooms.jpg"},
+  podcast_studio: { label: "Podcast Studio", imageUrl: "/public/images/podcast.jpg" },
+  tiktok_studio: { label: "TikTok Studio", imageUrl: "/public/images/tiktok.png" },
 };
 
 // Lazily builds the preview UI the first time it's needed, so this app
 // doesn't require any changes to its HTML file - just inserts itself into
 // the page right above the transcript.
 let roomPreviewInitialized = false;
+let roomPreviewActiveLayer = 0; // which of the two stacked <img> layers is currently on top
 function ensureRoomPreviewUI() {
   if (roomPreviewInitialized) return;
   roomPreviewInitialized = true;
@@ -472,22 +473,61 @@ function ensureRoomPreviewUI() {
   const style = document.createElement("style");
   style.textContent = `
     #room-preview { display: none; margin: 0 0 16px; text-align: center; }
-    #room-preview img {
+    #room-preview-frame {
+      position: relative;
       max-width: 100%;
+      aspect-ratio: 16 / 9;
       max-height: 260px;
+      margin: 0 auto;
       border-radius: 12px;
-      object-fit: cover;
-      opacity: 1;
-      transition: opacity 0.3s ease;
+      overflow: hidden;
+      background: #1e2230;
     }
-    #room-preview-label { margin-top: 6px; font-size: 0.9em; color: #8b94a7; }
+    #room-preview-frame img {
+      /* Both layers stacked exactly on top of each other - the crossfade
+         is just one layer's opacity going to 0 while the other goes to 1
+         at the same time, so the old photo dissolves straight into the
+         new one instead of fading through an empty gap. */
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      opacity: 0;
+      transition: opacity 0.5s ease;
+    }
+    #room-preview-frame img.active { opacity: 1; }
+    #room-preview-frame img.missing {
+      /* Image failed to load (see the onerror handler below) - shown as a
+         plain placeholder box instead of the browser's broken-image icon. */
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #room-preview-label { margin-top: 8px; font-size: 0.9em; color: #8b94a7; }
   `;
   document.head.appendChild(style);
 
   const container = document.createElement("div");
   container.id = "room-preview";
-  container.innerHTML = `<img id="room-preview-img" alt="" /><div id="room-preview-label"></div>`;
+  container.innerHTML = `
+    <div id="room-preview-frame">
+      <img class="room-preview-layer" alt="" />
+      <img class="room-preview-layer" alt="" />
+    </div>
+    <div id="room-preview-label"></div>
+  `;
   (transcriptEl.parentElement ?? document.body).insertBefore(container, transcriptEl);
+
+  // Falls back to a plain placeholder box instead of the browser's broken-
+  // image icon whenever an image path doesn't resolve to a real file - a
+  // reasonable state to handle gracefully, since it's expected until real
+  // room photos are wired up (see ROOM_DISPLAY_INFO above).
+  for (const layer of container.querySelectorAll(".room-preview-layer")) {
+    layer.addEventListener("error", (e) => {
+      if (e.target.getAttribute("src")) e.target.classList.add("missing");
+    });
+  }
 }
 
 // Crossfades to the given room's image - called both as soon as the
@@ -499,16 +539,25 @@ function showRoomPreview(room) {
   if (!info) return;
   ensureRoomPreviewUI();
   const container = document.getElementById("room-preview");
-  const img = document.getElementById("room-preview-img");
   const label = document.getElementById("room-preview-label");
+  const layers = container.querySelectorAll(".room-preview-layer");
+
   container.style.display = "block";
-  img.style.opacity = "0";
-  window.setTimeout(() => {
-    img.src = info.imageUrl;
-    img.alt = info.label;
-    label.textContent = info.label;
-    img.style.opacity = "1";
-  }, 180); // lets the fade-out finish before swapping the image, so it reads as one continuous crossfade rather than a jump cut
+  label.textContent = info.label;
+
+  // The layer that's about to come in gets loaded and faded up; the one
+  // currently showing just fades down underneath it - both transitions
+  // run at the same time via the shared CSS `transition: opacity`, which
+  // is what makes this read as a genuine crossfade rather than two
+  // separate fades happening one after another.
+  const incoming = layers[1 - roomPreviewActiveLayer];
+  const outgoing = layers[roomPreviewActiveLayer];
+  incoming.classList.remove("missing");
+  incoming.alt = info.label;
+  incoming.src = info.imageUrl;
+  incoming.classList.add("active");
+  outgoing.classList.remove("active");
+  roomPreviewActiveLayer = 1 - roomPreviewActiveLayer;
 }
 
 function hideRoomPreview() {
