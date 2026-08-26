@@ -17,6 +17,7 @@ from app.schemas import AdminLoginRequest
 from app.seed import seed_sample_data
 from app.voice_agent.initiate import router as initiate_router
 from app.voice_agent.converse import router as converse_router
+from app.voice_agent.realtime_auth import router as realtime_auth_router
 
 def success_response(
     message: str = "Request completed successfully",
@@ -78,7 +79,12 @@ app.add_middleware(
         "http://localhost:3003",
         "http://127.0.0.1:3003",
         "http://localhost:8000",
-        "http://127.0.0.1:8000"
+        "http://127.0.0.1:8000",
+        "http://localhost:5500",  # common "Live Server" VS Code extension port
+        "http://127.0.0.1:5500",
+        "http://localhost:5173",  # Vite's default dev server port (realtime agent tester)
+        "http://127.0.0.1:5173"
+
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -87,70 +93,139 @@ app.add_middleware(
 
 
 @app.exception_handler(RequestValidationError)
+
 async def validation_exception_handler(request, exc):
+
     return JSONResponse(
+
         status_code=422,
+
         content=error_response(
+
             message="Request validation failed",
+
             error_code="VALIDATION_ERROR",
+
             details=exc.errors(),
+
         ),
+
     )
+
+
+
 
 
 @app.exception_handler(SQLAlchemyError)
+
 async def sqlalchemy_exception_handler(request, exc):
+
     return JSONResponse(
+
         status_code=500,
+
         content=error_response(
+
             message="A database error occurred",
+
             error_code="DATABASE_ERROR",
+
             details=None,
+
         ),
+
     )
+
+
+
 
 
 @app.get("/")
+
 def root() -> dict:
+
     return success_response(
+
         message="Innovation City backend is running",
+
         data={
+
             "app_name": settings.app_name,
+
             "environment": settings.environment,
+
         },
+
     )
+
+
+
 
 
 @app.get("/health")
+
 def health_check() -> dict:
+
     return success_response(
+
         message="Application is healthy",
+
         data={
+
             "status": "ok",
+
         },
+
     )
+
+
+
 
 
 @app.get("/health/db")
+
 def database_health_check() -> dict:
+
     check_database_connection()
 
+
+
     return success_response(
+
         message="Database connection is healthy",
+
         data={
+
             "database": "connected",
+
         },
+
     )
 
 
+
+
+
 @app.post("/admin/auth/login")
+
 def admin_auth_login(payload: AdminLoginRequest):
+
     return admin_login(payload)
 
 
+
+
+
 app.include_router(kiosk_router)
+
 app.include_router(kiosk_flow_router)
+
 app.include_router(admin_router)
 
+
+
 app.include_router(initiate_router, prefix="/voice-agent")
+
 app.include_router(converse_router, prefix="/voice-agent")
+
+app.include_router(realtime_auth_router, prefix="/voice-agent")
