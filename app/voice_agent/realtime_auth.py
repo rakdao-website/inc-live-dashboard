@@ -19,12 +19,11 @@ adjust the `payload` dict below; the response is assumed to contain a
 extracted defensively below.
 """
 
-import os
-
 import httpx
 from fastapi import APIRouter, HTTPException
 
 from app.config import settings
+from app.voice_agent.knowledge_base_loader import load_knowledge_base as _load_knowledge_base
 from app.voice_agent.utils.logger import log_error, log_info
 
 router = APIRouter()
@@ -32,30 +31,7 @@ router = APIRouter()
 OPENAI_CLIENT_SECRETS_URL = "https://api.openai.com/v1/realtime/client_secrets"
 REQUEST_TIMEOUT_SECONDS = 10
 
-_KNOWLEDGE_BASE_PATH = os.path.join(os.path.dirname(__file__), "knowledge_base.md")
-_FALLBACK_KNOWLEDGE_BASE = (
-    "(Knowledge base document is currently unavailable. Tell the visitor you're "
-    "not sure and suggest they ask a reception associate for details.)"
-)
-_kb_cache: dict = {"mtime": None, "content": None}
-
 _client = httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS)
-
-
-def _load_knowledge_base() -> str:
-    try:
-        mtime = os.path.getmtime(_KNOWLEDGE_BASE_PATH)
-        if _kb_cache["mtime"] == mtime and _kb_cache["content"] is not None:
-            return _kb_cache["content"]
-        with open(_KNOWLEDGE_BASE_PATH, "r", encoding="utf-8") as f:
-            content = f.read().strip()
-        content = content if content else _FALLBACK_KNOWLEDGE_BASE
-        _kb_cache["mtime"] = mtime
-        _kb_cache["content"] = content
-        return content
-    except Exception as e:
-        log_error(f"Could not load knowledge base document at {_KNOWLEDGE_BASE_PATH}: {e}")
-        return _FALLBACK_KNOWLEDGE_BASE
 
 
 @router.get("/knowledge-base")
