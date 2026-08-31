@@ -3,8 +3,8 @@ Mints short-lived ("ephemeral") credentials for OpenAI's Realtime API.
 
 The actual voice session (RealtimeSession/RealtimeAgent, via
 @openai/agents/realtime) runs entirely client-side in the browser over
-WebRTC - the browser needs a credential to connect directly to OpenAI, but
-it must never see the real OPENAI_API_KEY. This endpoint calls OpenAI
+WebSocket - the browser needs a credential to connect directly to OpenAI,
+but it must never see the real OPENAI_API_KEY. This endpoint calls OpenAI
 server-side to mint a short-lived client_secret and hands only that back
 to the frontend.
 
@@ -19,11 +19,12 @@ adjust the `payload` dict below; the response is assumed to contain a
 extracted defensively below.
 """
 
+import os
+
 import httpx
 from fastapi import APIRouter, HTTPException
 
 from app.config import settings
-from app.voice_agent.conversation_agent import _load_knowledge_base
 from app.voice_agent.utils.logger import log_error, log_info
 
 router = APIRouter()
@@ -31,7 +32,30 @@ router = APIRouter()
 OPENAI_CLIENT_SECRETS_URL = "https://api.openai.com/v1/realtime/client_secrets"
 REQUEST_TIMEOUT_SECONDS = 10
 
+_KNOWLEDGE_BASE_PATH = os.path.join(os.path.dirname(__file__), "knowledge_base.md")
+_FALLBACK_KNOWLEDGE_BASE = (
+    "(Knowledge base document is currently unavailable. Tell the visitor you're "
+    "not sure and suggest they ask a reception associate for details.)"
+)
+_kb_cache: dict = {"mtime": None, "content": None}
+
 _client = httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS)
+
+
+def _load_knowledge_base() -> str:
+    try:
+        mtime = os.path.getmtime(_KNOWLEDGE_BASE_PATH)
+        if _kb_cache["mtime"] == mtime and _kb_cache["content"] is not None:
+            return _kb_cache["content"]
+        with open(_KNOWLEDGE_BASE_PATH, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+        content = content if content else _FALLBACK_KNOWLEDGE_BASE
+        _kb_cache["mtime"] = mtime
+        _kb_cache["content"] = content
+        return content
+    except Exception as e:
+        log_error(f"Could not load knowledge base document at {_KNOWLEDGE_BASE_PATH}: {e}")
+        return _FALLBACK_KNOWLEDGE_BASE
 
 
 @router.get("/knowledge-base")
@@ -51,7 +75,7 @@ async def get_knowledge_base():
 async def create_realtime_session():
     """
     Returns a short-lived client secret the frontend can use to connect
-    directly to OpenAI's Realtime API via WebRTC. Call this once per
+    directly to OpenAI's Realtime API via WebSocket. Call this once per
     conversation (when the visitor opens the realtime voice assistant).
     """
     if not settings.openai_api_key:
