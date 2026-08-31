@@ -3,8 +3,8 @@ Mints short-lived ("ephemeral") credentials for OpenAI's Realtime API.
 
 The actual voice session (RealtimeSession/RealtimeAgent, via
 @openai/agents/realtime) runs entirely client-side in the browser over
-WebRTC - the browser needs a credential to connect directly to OpenAI, but
-it must never see the real OPENAI_API_KEY. This endpoint calls OpenAI
+WebSocket - the browser needs a credential to connect directly to OpenAI,
+but it must never see the real OPENAI_API_KEY. This endpoint calls OpenAI
 server-side to mint a short-lived client_secret and hands only that back
 to the frontend.
 
@@ -51,7 +51,7 @@ async def get_knowledge_base():
 async def create_realtime_session():
     """
     Returns a short-lived client secret the frontend can use to connect
-    directly to OpenAI's Realtime API via WebRTC. Call this once per
+    directly to OpenAI's Realtime API via WebSocket. Call this once per
     conversation (when the visitor opens the realtime voice assistant).
     """
     if not settings.openai_api_key:
