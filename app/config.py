@@ -40,6 +40,24 @@ class Settings(BaseSettings):
     face_web_search_testing_mode: bool = False
     face_web_search_max_images: int = 3  # confirmed: multiple photos of the same person don't cost extra FaceCheck.ID credits
     
+    # Spacebring REST API (Basic auth). Sandbox credentials first, prod later.
+    spacebring_base_url: str = "https://api.spacebring.com"
+    spacebring_client_id: str = ""
+    spacebring_client_secret: str = ""
+    spacebring_network_id: str = ""
+    spacebring_location_id: str = ""
+    # Kiosk times are local wall-clock times; Spacebring wants UTC instants.
+    spacebring_timezone: str = "Asia/Dubai"
+    # "none" or "all". Unowned (anonymous) bookings have nobody to email.
+    spacebring_send_updates: str = "none"
+    # Off until the team decides how a visitor maps to a Spacebring customer.
+    # When on, visitors with a spacebring_customer_id own their booking and
+    # pay with their Spacebring credits.
+    spacebring_use_customer_owner: bool = False
+    # How often the API pulls Spacebring bookings into Postgres. 0 turns the
+    # background sync off (the script scripts/sync_spacebring_bookings.py still works).
+    spacebring_sync_interval_seconds: int = 60
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

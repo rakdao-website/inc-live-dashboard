@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 import threading
@@ -12,6 +14,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.admin import admin_login, router as admin_router
 from app.config import settings
 from app.database import Base, SessionLocal, check_database_connection, engine
+from app.spacebring_client import spacebring_enabled
 from app.face_recognition_service import FaceRecognitionUnavailable, get_face_recognition_service
 from app.routers.face import router as face_router
 from app.routers.kiosk import router as kiosk_router
@@ -56,6 +59,28 @@ def warm_face_recognition_model() -> None:
         print(f"Face recognition warm-up failed: {exc}")
 
 
+logger = logging.getLogger("spacebring.sync")
+
+
+async def spacebring_sync_loop() -> None:
+    """Pull Spacebring bookings into Postgres every N seconds."""
+    from app.spacebring_client import get_spacebring_client
+    from app.spacebring_sync import sync_bookings
+
+    def run_once() -> None:
+        with SessionLocal() as db:
+            result = sync_bookings(db, get_spacebring_client())
+        if result.created or result.updated or result.deleted:
+            logger.info("Spacebring sync: %s", result)
+
+    while True:
+        try:
+            await asyncio.to_thread(run_once)
+        except Exception as exc:  # never let the loop die; the next run retries
+            logger.warning("Spacebring sync failed: %s", exc)
+        await asyncio.sleep(settings.spacebring_sync_interval_seconds)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     if settings.auto_create_tables:
@@ -64,7 +89,12 @@ async def lifespan(_: FastAPI):
         with SessionLocal() as db:
             seed_sample_data(db)
     threading.Thread(target=warm_face_recognition_model, daemon=True).start()
+    sync_task = None
+    if spacebring_enabled() and settings.spacebring_sync_interval_seconds > 0:
+        sync_task = asyncio.create_task(spacebring_sync_loop())
     yield
+    if sync_task is not None:
+        sync_task.cancel()
 
 
 app = FastAPI(

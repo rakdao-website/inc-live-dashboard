@@ -6,10 +6,7 @@ FastAPI and SQLAlchemy backend for the Ground Floor dashboard and kiosk check-in
 
 1. Create a PostgreSQL database. In your local pgAdmin setup this is `INC_live_dashboard`.
 2. Copy `.env.example` to `.env` and set `DATABASE_URL` if your database credentials differ.
-3. Start Qdrant (used as the live face-recognition vector store):
-   ```
-   docker run -d --name qdrant -p 6333:6333 -p 6334:6334 -v qdrant_storage:/qdrant/storage qdrant/qdrant:latest
-   ```
+3. Install the pgvector extension for PostgreSQL (live face-recognition vector store; for example `brew install pgvector`, or use the `pgvector/pgvector` Docker image), then apply `migrations/2026_10_03_add_pgvector_face_vectors.sql` (it runs `CREATE EXTENSION vector`).
 4. Install dependencies: `pip install -r requirements.txt` (or `uv pip install -r requirements.txt` if using `uv`)
 5. Start the API: `uvicorn app.main:app --reload`
 
@@ -24,11 +21,11 @@ The default development account is username `admin` and password `admin123`.
 
 Face detection and recognition use InsightFace (`buffalo_l` model pack). The model downloads automatically (~300MB) on the first face-related API call — this can take a minute, and only happens once.
 
-Live face embeddings are stored in Qdrant (collection `face_embeddings`), not directly in Postgres. Postgres still holds a legacy/bulk-import gallery (`face_embeddings` table, used by `scripts/import_existing_faces.py`) plus visitor identity, capture, and audit data.
+Live face embeddings are stored in PostgreSQL with pgvector (`face_vectors` table, 512-d, cosine distance, HNSW index), next to visitor identity, capture, and audit data. The older `face_embeddings` table (JSON text) is legacy; `scripts/migrate_face_embeddings_to_pgvector.py` copies any rows from it into `face_vectors`.
 
 ### Reverse web face search (FaceCheck.ID)
 
-When a scanned face doesn't match anyone in the Qdrant gallery (score below the threshold in `app/face_recognition_service.py`), the kiosk can optionally query [FaceCheck.ID](https://facecheck.id/en/Face-Search/API) for public-web candidate matches, so the visitor can confirm "is this you?" before registering as new. This is off by default and safe to leave off — everything falls through to normal registration if disabled or unconfigured.
+When a scanned face doesn't match anyone in the face gallery (score below the threshold in `app/face_recognition_service.py`), the kiosk can optionally query [FaceCheck.ID](https://facecheck.id/en/Face-Search/API) for public-web candidate matches, so the visitor can confirm "is this you?" before registering as new. This is off by default and safe to leave off — everything falls through to normal registration if disabled or unconfigured.
 
 Relevant `.env` settings:
 ```env
@@ -50,7 +47,7 @@ FACE_WEB_SEARCH_MAX_IMAGES=3
 - `GET /api/events` - event schedule data with calculated live/upcoming/ended status
 - `GET /api/bookings` - booking schedule data with calculated live/upcoming/ended status
 - `GET /api/activity-feed` - latest live activity feed items
-- `POST /api/kiosk/recognize-face` - scans a face against the Qdrant gallery; falls back to FaceCheck.ID web search when unrecognized (see above)
+- `POST /api/kiosk/recognize-face` - scans a face against the pgvector gallery; falls back to FaceCheck.ID web search when unrecognized (see above)
 - `POST /api/kiosk/profiles`, `/api/kiosk/bookings`, `/api/kiosk/visit-sessions`, etc. - kiosk visitor check-in, registration, and booking flow
 - `POST /api/face/detect`, `/api/face/captures/{id}/link`, `/api/face/captures/{id}/dismiss` - admin-side review of unrecognized face captures and their web-search candidates
 
@@ -63,8 +60,8 @@ The original dashboard endpoints above remain read-only. Visitor, booking, and k
 - `app/routers/kiosk_flow.py` contains the kiosk visitor check-in flow: face recognition, registration, bookings, event selection.
 - `app/routers/face.py` contains the admin-facing face review flow: detect, list/link/dismiss unknown captures.
 - `app/kiosk_schemas.py` / `app/kiosk_flow_schemas.py` / `app/face_schemas.py` contain the request/response schemas for each router above.
-- `app/face_recognition_service.py` wraps InsightFace + Qdrant for face detection, embedding, and matching.
-- `app/face_gallery.py` is the legacy Postgres-backed face gallery, used by `scripts/import_existing_faces.py` for bulk enrollment.
+- `app/face_recognition_service.py` wraps InsightFace + pgvector for face detection, embedding, and matching.
+- `app/face_gallery.py` is the legacy JSON-text face gallery helper (embedding serialisation).
 - `app/face_web_search.py` integrates the optional FaceCheck.ID reverse image search fallback.
 - `app/face_unknown_capture.py` is shared logic for saving an unrecognized face and running the web search against it, used by both `kiosk_flow.py` and `face.py`.
 - `app/database.py` contains the SQLAlchemy database engine and session setup.
@@ -76,13 +73,15 @@ The supplied [`INC.session.sql`](INC.session.sql) remains available for direct P
 ## Scripts
 
 - `scripts/seed_poc.py --create-tables` - creates tables and seeds demo visitors/zones/events/bookings for local testing.
-- `scripts/import_existing_faces.py --dataset ./dataset` - bulk-enrolls face photos from a folder (one subfolder per visitor) into the Qdrant gallery.
-- `scripts/migrate_face_embeddings_to_qdrant.py` - one-off migration of any legacy Postgres `face_embeddings` rows into Qdrant.
+- `scripts/import_existing_faces.py --dataset ./dataset` - bulk-enrolls face photos from a folder (one subfolder per visitor) into the pgvector gallery.
+- `scripts/sync_spacebring_bookings.py` - pulls upcoming Spacebring bookings into Postgres once (the API also does this every `SPACEBRING_SYNC_INTERVAL_SECONDS`, default 60; 0 turns it off).
+- `scripts/sync_spacebring_zones.py` - links zones to Spacebring rooms by title.
+- `scripts/migrate_face_embeddings_to_pgvector.py` - one-off migration of any legacy Postgres `face_embeddings` rows into `face_vectors`.
 - `scripts/live_camera_worker.py` - standalone script for watching a physical camera feed and logging recognition events; separate from the kiosk's own in-browser camera flow.
 
 ## Tests
 
-Run the automated test suite (mocks the database and face recognition, no live camera or Qdrant server required):
+Run the automated test suite (mocks the database and face recognition, no live camera required; one test round-trips pgvector when it is available):
 ```
 pytest tests -q
 ```

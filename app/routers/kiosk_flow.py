@@ -10,6 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app import face_unknown_capture
+from app.config import settings
 from app.database import get_db
 from app.face_recognition_service import FaceRecognitionResult, FaceRecognitionUnavailable, get_face_recognition_service
 from app.kiosk_flow_schemas import (
@@ -20,6 +21,7 @@ from app.kiosk_flow_schemas import (
     FacialConsentRequest,
     KioskBookingCreate,
     KioskBookingRead,
+    KioskBookingReschedule,
     KioskEventRead,
     KioskVisitorRead,
     LicenseLookupRequest,
@@ -48,6 +50,7 @@ from app.kiosk_flow_services import (
     service_to_booking_defaults,
 )
 from app.models import (
+    ActivityFeed,
     Booking,
     Event,
     FaceProfile,
@@ -59,6 +62,17 @@ from app.models import (
     Zone,
 )
 from app.operating_hours import OPERATING_HOURS_MESSAGE, is_within_operating_hours
+from app.spacebring_booking_service import (
+    SlotUnavailable,
+    cancel_quietly,
+    create_in_spacebring,
+    ensure_free,
+    local_to_aware,
+    uses_spacebring,
+)
+from app.spacebring_client import SpacebringError, get_spacebring_client
+from app.spacebring_sync import delete_mirror_booking
+from app.spacebring_zones import TIKTOK_ZONE_IDS
 
 
 router = APIRouter(prefix="/api/kiosk", tags=["Kiosk Flow"])
@@ -108,6 +122,16 @@ def conflict_response(message: str, error_code: str) -> JSONResponse:
     return JSONResponse(
         status_code=status.HTTP_409_CONFLICT,
         content=error_response(message=message, error_code=error_code),
+    )
+
+
+def spacebring_unavailable_response() -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        content=error_response(
+            message="The booking service is unavailable. Please try again or ask reception.",
+            error_code="SPACEBRING_UNAVAILABLE",
+        ),
     )
 
 
@@ -746,9 +770,15 @@ def create_kiosk_booking(
             error_code="INVALID_ROOM_TYPE",
         )
 
-    if payload.service_type in ("podcast_studio", "tiktok_studio") and zone_id != default_zone_id:
+    if payload.service_type == "podcast_studio" and zone_id != default_zone_id:
         return bad_request_response(
             message="This studio has a fixed room",
+            error_code="INVALID_ROOM_TYPE",
+        )
+
+    if payload.service_type == "tiktok_studio" and zone_id not in TIKTOK_ZONE_IDS:
+        return bad_request_response(
+            message="Please choose a TikTok room",
             error_code="INVALID_ROOM_TYPE",
         )
 
@@ -767,7 +797,23 @@ def create_kiosk_booking(
             error_code="OUTSIDE_OPERATING_HOURS",
         )
 
-    if schedule_has_conflict(
+    spacebring_booking_id = None
+    if uses_spacebring(zone):
+        # Spacebring is the system of record: it decides availability.
+        try:
+            spacebring_booking_id = create_in_spacebring(
+                zone, visitor, room_name,
+                payload.booking_date, payload.booking_time_start, end_time,
+            )
+        except SlotUnavailable:
+            return conflict_response(
+                message="This time slot is already booked. Please choose another time.",
+                error_code="BOOKING_OVERLAP",
+            )
+        except SpacebringError as exc:
+            logger.error("Spacebring booking failed: %s", exc)
+            return spacebring_unavailable_response()
+    elif schedule_has_conflict(
         db,
         zone_id=zone_id,
         schedule_date=payload.booking_date,
@@ -793,6 +839,7 @@ def create_kiosk_booking(
         booking_date=payload.booking_date,
         booking_time_start=payload.booking_time_start,
         booking_time_end=end_time,
+        spacebring_booking_id=spacebring_booking_id,
     )
     db.add(booking)
 
@@ -816,14 +863,28 @@ def create_kiosk_booking(
         db.commit()
     except SQLAlchemyError as exc:
         db.rollback()
-
-        if is_overlap_error(exc):
-            return conflict_response(
-                message="This time slot is already booked. Please choose another time.",
-                error_code="BOOKING_OVERLAP",
+        if spacebring_booking_id and "spacebring_booking_id" in str(exc):
+            # The Spacebring sync mirrored this booking first: the booking is fine.
+            existing = (
+                db.query(Booking).filter(Booking.spacebring_booking_id == spacebring_booking_id).first()
             )
+            if existing is not None:
+                booking = existing
+                spacebring_booking_id = None  # nothing to roll back
+                exc = None
+            else:
+                cancel_quietly(spacebring_booking_id)
+        elif spacebring_booking_id:
+            cancel_quietly(spacebring_booking_id)
 
-        raise
+        if exc is not None:
+            if is_overlap_error(exc):
+                return conflict_response(
+                    message="This time slot is already booked. Please choose another time.",
+                    error_code="BOOKING_OVERLAP",
+                )
+
+            raise
 
     db.refresh(booking)
 
@@ -840,6 +901,158 @@ def create_kiosk_booking(
     return success_response(
         message="Booking created",
         data=data.model_dump(mode="json"),
+    )
+
+
+@router.get("/availability")
+def check_room_availability(
+    zone_id: str = Query(..., max_length=30),
+    booking_date: date = Query(...),
+    booking_time_start: time = Query(...),
+    duration_minutes: int = Query(..., gt=0, le=480),
+    db: Session = Depends(get_db),
+):
+    """Is this room free? Spacebring answers for mapped rooms, Postgres for the rest."""
+    zone = db.get(Zone, zone_id)
+    if zone is None or not zone.is_bookable:
+        return not_found_response(message="Room not found", error_code="ZONE_NOT_FOUND")
+
+    end_time = calculate_end_time(booking_time_start, duration_minutes)
+    if end_time <= booking_time_start:
+        return bad_request_response(
+            message="Please choose a time and duration that ends before midnight.",
+            error_code="BOOKING_ENDS_AFTER_MIDNIGHT",
+        )
+    if not is_within_operating_hours(booking_time_start, end_time):
+        return bad_request_response(message=OPERATING_HOURS_MESSAGE, error_code="OUTSIDE_OPERATING_HOURS")
+
+    reason = None
+    if uses_spacebring(zone):
+        try:
+            ensure_free(zone, booking_date, booking_time_start, end_time)
+            available = True
+        except SlotUnavailable as exc:
+            available, reason = False, str(exc)
+        except SpacebringError as exc:
+            logger.error("Spacebring availability failed: %s", exc)
+            return spacebring_unavailable_response()
+    else:
+        available = not schedule_has_conflict(
+            db,
+            zone_id=zone_id,
+            schedule_date=booking_date,
+            start_time=booking_time_start,
+            end_time=end_time,
+        )
+
+    return success_response(
+        message="Room is free" if available else "Room is not free",
+        data={
+            "available": available,
+            "reason": reason,
+            "zone_id": zone.zone_id,
+            "room_name": zone.zone_name,
+            "booking_date": booking_date.isoformat(),
+            "booking_time_start": booking_time_start.isoformat(),
+            "booking_time_end": end_time.isoformat(),
+        },
+    )
+
+
+@router.delete("/bookings/{booking_id}")
+def cancel_kiosk_booking(booking_id: int, db: Session = Depends(get_db)):
+    booking = db.get(Booking, booking_id)
+    if booking is None:
+        return not_found_response(message="Booking not found", error_code="BOOKING_NOT_FOUND")
+
+    if booking.spacebring_booking_id:
+        try:
+            get_spacebring_client().cancel_booking(booking.spacebring_booking_id)
+        except SpacebringError as exc:
+            if exc.status_code != 404:  # already gone in Spacebring: still clean the mirror
+                logger.error("Spacebring cancel failed: %s", exc)
+                return spacebring_unavailable_response()
+
+    delete_mirror_booking(db, booking)
+    db.commit()
+    return success_response(message="Booking cancelled", data={"booking_id": booking_id})
+
+
+@router.patch("/bookings/{booking_id}")
+def reschedule_kiosk_booking(
+    booking_id: int,
+    payload: KioskBookingReschedule,
+    db: Session = Depends(get_db),
+):
+    booking = db.get(Booking, booking_id)
+    if booking is None:
+        return not_found_response(message="Booking not found", error_code="BOOKING_NOT_FOUND")
+
+    new_date = payload.booking_date or booking.booking_date
+    new_start = payload.booking_time_start or booking.booking_time_start
+    if payload.duration_minutes is not None:
+        new_end = calculate_end_time(new_start, payload.duration_minutes)
+    else:
+        length = datetime.combine(date.today(), booking.booking_time_end) - datetime.combine(
+            date.today(), booking.booking_time_start
+        )
+        new_end = (datetime.combine(date.today(), new_start) + length).time()
+
+    if new_end <= new_start:
+        return bad_request_response(
+            message="Please choose a time and duration that ends before midnight.",
+            error_code="BOOKING_ENDS_AFTER_MIDNIGHT",
+        )
+    if not is_within_operating_hours(new_start, new_end):
+        return bad_request_response(message=OPERATING_HOURS_MESSAGE, error_code="OUTSIDE_OPERATING_HOURS")
+
+    zone = db.get(Zone, booking.zone_id)
+    if booking.spacebring_booking_id:
+        try:
+            client = get_spacebring_client()
+            client.update_booking(
+                booking.spacebring_booking_id,
+                start=local_to_aware(new_date, new_start),
+                end=local_to_aware(new_date, new_end),
+                send_updates=settings.spacebring_send_updates,
+            )
+        except SpacebringError as exc:
+            if exc.status_code in (400, 409):
+                return conflict_response(
+                    message="This time slot is already booked. Please choose another time.",
+                    error_code="BOOKING_OVERLAP",
+                )
+            logger.error("Spacebring update failed: %s", exc)
+            return spacebring_unavailable_response()
+    elif schedule_has_conflict(
+        db,
+        zone_id=booking.zone_id,
+        schedule_date=new_date,
+        start_time=new_start,
+        end_time=new_end,
+        exclude_booking_id=booking_id,
+    ):
+        return conflict_response(
+            message="This time slot is already booked. Please choose another time.",
+            error_code="BOOKING_OVERLAP",
+        )
+
+    booking.booking_start_date = booking.booking_end_date = booking.booking_date = new_date
+    booking.booking_time_start, booking.booking_time_end = new_start, new_end
+    db.commit()
+    db.refresh(booking)
+    return success_response(
+        message="Booking updated",
+        data=KioskBookingRead(
+            booking_id=booking.booking_id,
+            booking_type=booking.booking_type,
+            booking_name=booking.booking_name,
+            booking_date=booking.booking_date,
+            booking_time_start=booking.booking_time_start,
+            booking_time_end=booking.booking_time_end,
+            zone_id=booking.zone_id,
+            room_name=zone.zone_name if zone else booking.booking_name,
+        ).model_dump(mode="json"),
     )
 
 

@@ -96,6 +96,12 @@ class KioskBookingCreate(BaseModel):
     duration_minutes: int = Field(..., gt=0, le=480)
 
 
+class KioskBookingReschedule(BaseModel):
+    booking_date: Optional[date] = None
+    booking_time_start: Optional[time] = None
+    duration_minutes: Optional[int] = Field(default=None, gt=0, le=480)
+
+
 class EventSelectionCreate(BaseModel):
     visitor_id: int
     visit_session_id: Optional[int] = None

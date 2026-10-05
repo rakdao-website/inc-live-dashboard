@@ -41,6 +41,11 @@ class Zone(Base):
         nullable=False,
         server_default=text("FALSE"),
     )
+    spacebring_resource_id: Mapped[Optional[str]] = mapped_column(
+        String(40),
+        nullable=True,
+        unique=True,
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
         nullable=False,
@@ -139,6 +144,11 @@ class Booking(Base):
     booking_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     booking_time_start: Mapped[time] = mapped_column(Time, nullable=False)
     booking_time_end: Mapped[time] = mapped_column(Time, nullable=False)
+    spacebring_booking_id: Mapped[Optional[str]] = mapped_column(
+        String(40),
+        nullable=True,
+        unique=True,
+    )
 
     zone: Mapped[Zone] = relationship(back_populates="bookings")
     visitor: Mapped[Optional["Visitor"]] = relationship(back_populates="bookings")
@@ -165,6 +175,9 @@ class Visitor(Base):
         server_default=text("FALSE"),
     )
     face_reference_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    # Spacebring customer (membership) ID. Nullable: everyone books as an
+    # anonymous visitor until the team decides how customers are identified.
+    spacebring_customer_id: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     face_consent_given: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
