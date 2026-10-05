@@ -1,0 +1,123 @@
+<title>Visitor Experience Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20,400,0,0&display=block">
+<style>
+/* layout: four horizontal lanes on a fixed 1180px canvas, orthogonal connectors, flow codes A/B/C tie lines to the step lists below */
+:root{--bg:#F3F6FA;--surface:#FFFFFF;--lane:#E9EEF5;--ink:#14202E;--muted:#586879;--line:#C7D1DE;--tile:#E3EAF4;--A:#2563EB;--B:#0B8A79;--C:#A86A0B;--tagbg:#14202E;--tagfg:#FFFFFF;
+--f-sans:"IBM Plex Sans",system-ui,sans-serif;--f-mono:"IBM Plex Mono",ui-monospace,monospace}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0D131B;--surface:#172130;--lane:#111A26;--ink:#E7EDF5;--muted:#93A4B8;--line:#2B3B50;--tile:#233450;--A:#7DA8FF;--B:#43CDB8;--C:#F0B24B;--tagbg:#E7EDF5;--tagfg:#0D131B;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#0D131B;--surface:#172130;--lane:#111A26;--ink:#E7EDF5;--muted:#93A4B8;--line:#2B3B50;--tile:#233450;--A:#7DA8FF;--B:#43CDB8;--C:#F0B24B;--tagbg:#E7EDF5;--tagfg:#0D131B;color-scheme:dark}
+body{background:var(--bg);color:var(--ink);font-family:var(--f-sans);margin:0;padding-inline:20px;padding-block:28px 40px}
+.wrap{max-width:1180px;margin:0 auto}
+h1{font-size:26px;font-weight:600;margin:0 0 6px;text-wrap:balance}
+.lede{color:var(--muted);margin:0 0 20px;max-width:70ch;font-size:15px;line-height:1.5}
+.legend{display:flex;flex-wrap:wrap;gap:8px 22px;font-size:12.5px;color:var(--muted);margin-bottom:14px;align-items:center}
+.legend span{display:inline-flex;align-items:center;gap:7px}
+.sw{width:22px;height:0;border-top:2.5px solid}
+.k{font-family:var(--f-mono);font-size:10px;padding:2px 6px;border-radius:3px}
+.k.n{background:var(--tagbg);color:var(--tagfg)}.k.c{border:1px solid var(--muted);color:var(--ink)}.k.b{color:var(--muted);border:1px solid var(--line)}
+.scroller{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--bg)}
+.canvas{position:relative;width:1180px;height:660px}
+.band{position:absolute;left:16px;right:16px;background:var(--lane);border-radius:8px}
+.band span{position:absolute;left:14px;top:14px;font-family:var(--f-mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;font-weight:500}
+.band em{position:absolute;left:14px;top:32px;font-style:normal;font-size:11px;color:var(--muted);width:96px;line-height:1.3}
+svg.lines{position:absolute;inset:0;width:1180px;height:660px;pointer-events:none}
+.ln{fill:none;stroke-width:1.8;stroke-linejoin:round}
+.ln.a{stroke:var(--A)}.ln.b{stroke:var(--B)}.ln.c{stroke:var(--C)}
+.pill rect{fill:var(--surface);stroke-width:1.2}.pill text{font-family:var(--f-mono);font-size:10.5px;font-weight:500}
+.pill.a rect{stroke:var(--A)}.pill.a text{fill:var(--A)}.pill.b rect{stroke:var(--B)}.pill.b text{fill:var(--B)}.pill.c rect{stroke:var(--C)}.pill.c text{fill:var(--C)}
+.node{position:absolute;box-sizing:border-box;background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:9px 10px;display:flex;flex-direction:column;gap:2px;z-index:2}
+.node.new{border-style:dashed;border-color:var(--muted)}
+.node .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
+.ico{width:28px;height:28px;border-radius:6px;background:var(--tile);display:grid;place-items:center}
+.ms{font-family:"Material Symbols Outlined";font-style:normal;font-size:19px;line-height:1;font-weight:400;letter-spacing:normal;text-transform:none;white-space:nowrap;-webkit-font-feature-settings:"liga";font-feature-settings:"liga";color:var(--ink)}
+.tag{font-family:var(--f-mono);font-size:9.5px;letter-spacing:.06em;padding:2px 5px;border-radius:3px;color:var(--muted);border:1px solid var(--line)}
+.node.new .tag{background:var(--tagbg);color:var(--tagfg);border-color:var(--tagbg)}
+.node.change .tag{color:var(--ink);border-color:var(--muted)}
+.node b{font-size:13px;font-weight:600;line-height:1.2}
+.node small{font-size:11px;color:var(--muted);line-height:1.3}
+.flows{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:18px;margin-top:26px}
+.flow h2{font-size:15px;font-weight:600;margin:0 0 4px;display:flex;gap:8px;align-items:center}
+.flow h2 i{display:inline-block;width:10px;height:10px;border-radius:50%}
+.flow p.s{margin:0 0 10px;font-size:12.5px;color:var(--muted)}
+.flow ol{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:9px}
+.flow li{display:grid;grid-template-columns:34px 1fr;gap:8px;font-size:13.5px;line-height:1.45;min-width:0}
+.code{font-family:var(--f-mono);font-size:11px;font-weight:500;border:1.2px solid;border-radius:9px;height:18px;line-height:16px;text-align:center;margin-top:2px}
+.fa .code{color:var(--A);border-color:var(--A)}.fb .code{color:var(--B);border-color:var(--B)}.fc .code{color:var(--C);border-color:var(--C)}
+.fa h2 i{background:var(--A)}.fb h2 i{background:var(--B)}.fc h2 i{background:var(--C)}
+.note{margin-top:22px;font-size:12.5px;color:var(--muted);line-height:1.5;max-width:80ch}
+</style>
+<div class="wrap">
+<h1>Visitor Experience Architecture</h1>
+<p class="lede">Proof of concept: an entrance camera that only logs arrivals, and Screen 2 with its own camera, microphone and speaker.</p>
+<div class="legend">
+<span><i class="sw" style="border-color:var(--A)"></i>A Arrival</span>
+<span><i class="sw" style="border-color:var(--B)"></i>B At Screen 2</span>
+<span><i class="sw" style="border-color:var(--C)"></i>C Approval</span>
+<span><i class="k n">NEW</i>to build, dashed</span>
+<span><i class="k c">CHANGE</i>exists, needs work</span>
+<span><i class="k b">BUILT</i>works today</span>
+</div>
+<div class="scroller"><div class="canvas">
+<div class="band" style="top:30px;height:136px"><span>Touchpoints</span><em>people and devices</em></div>
+<div class="band" style="top:186px;height:136px"><span>Application</span><em>FastAPI backend</em></div>
+<div class="band" style="top:342px;height:136px"><span>External</span><em>third-party services</em></div>
+<div class="band" style="top:498px;height:140px"><span>Data</span><em>our servers</em></div>
+
+<svg class="lines" viewBox="0 0 1180 660" aria-hidden="true"><defs><marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<path class="ln a" d="M206 150 V206" marker-end="url(#ah)"/>
+<path class="ln a" d="M276 256 H304" marker-end="url(#ah)"/>
+<path class="ln a" d="M374 306 V518" marker-end="url(#ah)"/>
+<path class="ln a" d="M444 256 H472" marker-end="url(#ah)"/>
+<path class="ln a" d="M552 306 V362" marker-end="url(#ah)"/>
+<path class="ln a" d="M480 306 V518" marker-end="url(#ah)"/>
+<path class="ln b" d="M660 150 V178 H374 V206" marker-end="url(#ah)"/>
+<path class="ln b" d="M860 150 V206" marker-end="url(#ah)"/>
+<path class="ln b" d="M794 50 V22 H1140 V412 H1116" marker-end="url(#ah)" marker-start="url(#ah)"/>
+<path class="ln b" d="M700 150 V206" marker-end="url(#ah)"/>
+<path class="ln b" d="M720 306 V362" marker-end="url(#ah)"/>
+<path class="ln b" d="M648 306 V518" marker-end="url(#ah)"/>
+<path class="ln b" d="M878 306 V518" marker-end="url(#ah)"/>
+<path class="ln b" d="M948 256 H976" marker-end="url(#ah)"/>
+<path class="ln c" d="M1046 150 V206" marker-end="url(#ah)"/>
+<path class="ln c" d="M984 306 V518" marker-end="url(#ah)"/>
+<g class="pill a"><rect x="192" y="169" width="28" height="18" rx="9"/><text x="206" y="182" text-anchor="middle">A1</text></g>
+<g class="pill a"><rect x="276" y="231" width="28" height="18" rx="9"/><text x="290" y="244" text-anchor="middle">A2</text></g>
+<g class="pill a"><rect x="360" y="479" width="28" height="18" rx="9"/><text x="374" y="492" text-anchor="middle">A3</text></g>
+<g class="pill a"><rect x="444" y="231" width="28" height="18" rx="9"/><text x="458" y="244" text-anchor="middle">A4</text></g>
+<g class="pill a"><rect x="538" y="325" width="28" height="18" rx="9"/><text x="552" y="338" text-anchor="middle">A5</text></g>
+<g class="pill a"><rect x="466" y="325" width="28" height="18" rx="9"/><text x="480" y="338" text-anchor="middle">A6</text></g>
+<g class="pill b"><rect x="503" y="169" width="28" height="18" rx="9"/><text x="517" y="182" text-anchor="middle">B1</text></g>
+<g class="pill b"><rect x="846" y="169" width="28" height="18" rx="9"/><text x="860" y="182" text-anchor="middle">B2</text></g>
+<g class="pill b"><rect x="948" y="231" width="28" height="18" rx="9"/><text x="962" y="244" text-anchor="middle">B3</text></g>
+<g class="pill b"><rect x="986" y="13" width="28" height="18" rx="9"/><text x="1000" y="26" text-anchor="middle">B4</text></g>
+<g class="pill b"><rect x="686" y="169" width="28" height="18" rx="9"/><text x="700" y="182" text-anchor="middle">B5</text></g>
+<g class="pill b"><rect x="706" y="325" width="28" height="18" rx="9"/><text x="720" y="338" text-anchor="middle">B6</text></g>
+<g class="pill b"><rect x="634" y="479" width="28" height="18" rx="9"/><text x="648" y="492" text-anchor="middle">B7</text></g>
+<g class="pill b"><rect x="864" y="479" width="28" height="18" rx="9"/><text x="878" y="492" text-anchor="middle">B8</text></g>
+<g class="pill c"><rect x="1032" y="169" width="28" height="18" rx="9"/><text x="1046" y="182" text-anchor="middle">C1</text></g>
+<g class="pill c"><rect x="970" y="479" width="28" height="18" rx="9"/><text x="984" y="492" text-anchor="middle">C2</text></g>
+</svg>
+<div class="node new" style="left:136px;top:50px;width:140px;height:100px"><div class="top"><span class="ico"><i class="ms" aria-hidden="true">photo_camera</i></span><span class="tag">NEW</span></div><b>Entrance camera</b><small>Outside door, logs only</small></div>
+<div class="node change" style="left:640px;top:50px;width:308px;height:100px"><div class="top"><span class="ico"><i class="ms" aria-hidden="true">desktop_windows</i></span><span class="tag">CHANGE</span></div><b>Screen 2 kiosk</b><small>Camera, mic and speaker. Next.js touch UI</small></div>
+<div class="node change" style="left:976px;top:50px;width:140px;height:100px"><div class="top"><span class="ico"><i class="ms" aria-hidden="true">admin_panel_settings</i></span><span class="tag">CHANGE</span></div><b>Admin panel</b><small>Approve and review</small></div>
+<div class="node new" style="left:136px;top:206px;width:140px;height:100px"><div class="top"><span class="ico"><i class="ms" aria-hidden="true">stream</i></span><span class="tag">NEW</span></div><b>Arrival ingest</b><small>Sample frames, dedupe</small></div>
+<div class="node change" style="left:304px;top:206px;width:140px;height:100px"><div class="top"><span class="ico"><i class="ms" aria-hidden="true">face</i></span><span class="tag">CHANGE</span></div><b>Face matching</b><small>InsightFace, 0.60 cut-off</small></div>
+<div class="node change" style="left:472px;top:206px;width:140px;height:100px"><div class="top"><span class="ico"><i class="ms" aria-hidden="true">travel_explore</i></span><span class="tag">CHANGE</span></div><b>Web search job</b><small>Top 3, daily cap</small></div>
+<div class="node change" style="left:640px;top:206px;width:140px;height:100px"><div class="top"><span class="ico"><i class="ms" aria-hidden="true">record_voice_over</i></span><span class="tag">CHANGE</span></div><b>Voice tools</b><small>Look up, register, book</small></div>
+<div class="node new" style="left:808px;top:206px;width:140px;height:100px"><div class="top"><span class="ico"><i class="ms" aria-hidden="true">person_add</i></span><span class="tag">NEW</span></div><b>Match and register</b><small>Link capture, set Pending</small></div>
+<div class="node new" style="left:976px;top:206px;width:140px;height:100px"><div class="top"><span class="ico"><i class="ms" aria-hidden="true">fact_check</i></span><span class="tag">NEW</span></div><b>Approval queue</b><small>Pending to approved</small></div>
+<div class="node built" style="left:492px;top:362px;width:120px;height:100px"><div class="top"><span class="ico"><i class="ms" aria-hidden="true">image_search</i></span><span class="tag">BUILT</span></div><b>FaceCheck.ID</b><small>Web face search</small></div>
+<div class="node built" style="left:660px;top:362px;width:120px;height:100px"><div class="top"><span class="ico"><i class="ms" aria-hidden="true">event_available</i></span><span class="tag">BUILT</span></div><b>Spacebring</b><small>Room bookings, sandbox</small></div>
+<div class="node built" style="left:996px;top:362px;width:120px;height:100px"><div class="top"><span class="ico"><i class="ms" aria-hidden="true">graphic_eq</i></span><span class="tag">BUILT</span></div><b>OpenAI Realtime</b><small>Live voice</small></div>
+<div class="node change" style="left:136px;top:518px;width:308px;height:100px"><div class="top"><span class="ico"><i class="ms" aria-hidden="true">hub</i></span><span class="tag">CHANGE</span></div><b>PostgreSQL + pgvector</b><small>512-d face vectors, replaces Qdrant</small></div>
+<div class="node change" style="left:472px;top:518px;width:140px;height:100px"><div class="top"><span class="ico"><i class="ms" aria-hidden="true">encrypted</i></span><span class="tag">CHANGE</span></div><b>Photo store</b><small>Encrypted files, expiry date</small></div>
+<div class="node change" style="left:640px;top:518px;width:476px;height:100px"><div class="top"><span class="ico"><i class="ms" aria-hidden="true">database</i></span><span class="tag">CHANGE</span></div><b>PostgreSQL</b><small>Visitors, arrivals, bookings, approvals</small></div>
+</div></div>
+<div class="flows">
+<section class="flow fa"><h2><i></i>A. Arrival</h2><p class="s">Runs before the visitor reaches the screen</p><ol><li><span class="code">A1</span><span>The camera outside the door sends frames to Arrival ingest. It only logs. Nobody is greeted.</span></li><li><span class="code">A2</span><span>Ingest samples frames and counts each person once per visit.</span></li><li><span class="code">A3</span><span>Face matching compares against pgvector. Known people are logged as arrivals.</span></li><li><span class="code">A4</span><span>Unknown faces go to the web search job, once per person per visit, with a daily cap.</span></li><li><span class="code">A5</span><span>FaceCheck.ID returns the top 3 candidates.</span></li><li><span class="code">A6</span><span>The photo and matches are saved with a 90-day expiry date.</span></li></ol></section>
+<section class="flow fb"><h2><i></i>B. At Screen 2</h2><p class="s">Recognition, confirmation, voice and booking</p><ol><li><span class="code">B1</span><span>Camera 2 scans the visitor. A known face is greeted by name.</span></li><li><span class="code">B2</span><span>An unknown face is linked to its entrance capture, so the ready top 3 photos appear as Is this you?</span></li><li><span class="code">B3</span><span>The visitor's pick, or a new entry, is saved as Pending.</span></li><li><span class="code">B4</span><span>The browser opens the voice session with OpenAI Realtime using a short-lived token from our backend.</span></li><li><span class="code">B5</span><span>The assistant calls Voice tools to look up, register and book.</span></li><li><span class="code">B6</span><span>Podcast and TikTok room bookings go to Spacebring.</span></li><li><span class="code">B7</span><span>Meeting room bookings stay in our database.</span></li><li><span class="code">B8</span><span>Registration and link results are stored in PostgreSQL.</span></li></ol></section>
+<section class="flow fc"><h2><i></i>C. Approval</h2><p class="s">Nothing is confirmed without an admin</p><ol><li><span class="code">C1</span><span>Admin opens the approval queue in the admin panel.</span></li><li><span class="code">C2</span><span>Approving turns a Pending record into a confirmed visitor. Approval rules are still to be defined.</span></li></ol></section>
+</div>
+<p class="note">The two PostgreSQL boxes are one database. One holds face vectors, the other holds everything else. Each record carries a 90-day expiry date; automatic deletion stays off for the POC. Qdrant is retired once pgvector is in place.</p>
+</div>
