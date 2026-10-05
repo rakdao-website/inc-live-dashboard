@@ -36,7 +36,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app import face_gallery  # noqa: E402
 from app.database import Base, SessionLocal, engine  # noqa: E402
 from app.face_recognition_service import (  # noqa: E402
     FaceRecognitionUnavailable,
@@ -133,13 +132,7 @@ def import_dataset(dataset_dir: Path, *, create_missing: bool, dry_run: bool) ->
             if dry_run:
                 print(f"  = would store {len(embeddings)} embedding(s) as {identifier}")
             else:
-                face_gallery.replace_embeddings(
-                    db,
-                    face_identifier=identifier,
-                    embeddings=embeddings,
-                    visitor_id=visitor.visitor_id,
-                    source_images=sources,
-                )
+                service.database.replace_person(identifier, embeddings)
                 visitor.face_reference_id = identifier
                 print(f"  = stored {len(embeddings)} embedding(s) as {identifier}")
 

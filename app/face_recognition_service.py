@@ -7,8 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
+from sqlalchemy import text
 
 
 VENDOR_PATH = Path(__file__).with_name("vendor")
@@ -27,9 +26,6 @@ PROVIDERS = ["CPUExecutionProvider"]
 DETECTION_SIZE = (320, 320)
 CAMERA_INDEX = 0
 
-QDRANT_HOST = "localhost"
-QDRANT_PORT = 6333
-QDRANT_COLLECTION = "face_embeddings"
 EMBEDDING_SIZE = 512
 
 THUMBNAIL_MAX_CHARS = 200_000  # keep payload reasonable
@@ -55,18 +51,65 @@ class FaceRecognitionResult:
     message: str
 
 
-class FaceDatabase:
-    def __init__(self, host: str = QDRANT_HOST, port: int = QDRANT_PORT):
-        self.client = QdrantClient(host=host, port=port)
-        self._ensure_collection()
+def vector_literal(vector: Any) -> str:
+    """pgvector text form, e.g. '[0.1,0.2,...]' (cast with ::vector in SQL)."""
+    return "[" + ",".join(f"{float(x):.8f}" for x in vector) + "]"
 
-    def _ensure_collection(self) -> None:
-        collections = [c.name for c in self.client.get_collections().collections]
-        if QDRANT_COLLECTION not in collections:
-            self.client.create_collection(
-                collection_name=QDRANT_COLLECTION,
-                vectors_config=VectorParams(size=EMBEDDING_SIZE, distance=Distance.COSINE),
-            )
+
+class PgVectorStore:
+    """Face vectors in PostgreSQL (pgvector, cosine distance, HNSW index)."""
+
+    def __init__(self, session_factory=None):
+        if session_factory is None:
+            from app.database import SessionLocal
+
+            session_factory = SessionLocal
+        self._session_factory = session_factory
+
+    def search(self, vector: np.ndarray, limit: int) -> list[dict[str, Any]]:
+        with self._session_factory() as db:
+            rows = db.execute(
+                text(
+                    "SELECT face_identifier, photo_base64, "
+                    "1 - (embedding <=> CAST(:q AS vector)) AS score "
+                    "FROM face_vectors "
+                    "ORDER BY embedding <=> CAST(:q AS vector) "
+                    "LIMIT :k"
+                ),
+                {"q": vector_literal(vector), "k": limit},
+            ).all()
+        return [
+            {"name": row.face_identifier, "photo": row.photo_base64, "score": float(row.score)}
+            for row in rows
+        ]
+
+    def replace(self, name: str, vectors: list[np.ndarray], photo_base64: str | None) -> None:
+        visitor_id = _visitor_id_from_identifier(name)
+        with self._session_factory() as db:
+            db.execute(text("DELETE FROM face_vectors WHERE face_identifier = :n"), {"n": name})
+            for vector in vectors:
+                db.execute(
+                    text(
+                        "INSERT INTO face_vectors "
+                        "(face_identifier, visitor_id, embedding, photo_base64, model_name) "
+                        "VALUES (:n, (SELECT visitor_id FROM visitors WHERE visitor_id = :v), "
+                        "CAST(:e AS vector), :p, :m)"
+                    ),
+                    {"n": name, "v": visitor_id, "e": vector_literal(vector), "p": photo_base64, "m": MODEL_NAME},
+                )
+            db.commit()
+
+
+def _visitor_id_from_identifier(name: str) -> int | None:
+    prefix, _, rest = name.partition(":")
+    return int(rest) if prefix == "visitor" and rest.isdigit() else None
+
+
+class FaceDatabase:
+    """Matching and enrolment on top of a vector store (pgvector by default)."""
+
+    def __init__(self, store: PgVectorStore | None = None):
+        self.store = store or PgVectorStore()
 
     @staticmethod
     def normalize(vector: Any) -> np.ndarray:
@@ -76,20 +119,14 @@ class FaceDatabase:
 
     def match(self, embedding: Any, top_k: int = 3) -> list[FaceMatch]:
         query = self.normalize(embedding)
-        results = self.client.query_points(
-            collection_name=QDRANT_COLLECTION,
-            query=query.tolist(),
-            limit=top_k,
-        ).points
-
         return [
             FaceMatch(
-                name=result.payload.get("name"),
-                score=float(result.score),
-                recognized=float(result.score) >= MATCH_THRESHOLD,
-                photo_base64=result.payload.get("photo"),
+                name=row["name"],
+                score=row["score"],
+                recognized=row["score"] >= MATCH_THRESHOLD,
+                photo_base64=row["photo"],
             )
-            for result in results
+            for row in self.store.search(query, top_k)
         ]
 
     def replace_person(
@@ -98,25 +135,9 @@ class FaceDatabase:
         embeddings: list[Any],
         photo_base64: str | None = None,
     ) -> None:
-        self.client.delete(
-            collection_name=QDRANT_COLLECTION,
-            points_selector=Filter(
-                must=[FieldCondition(key="name", match=MatchValue(value=name))]
-            ),
-        )
-        payload = {"name": name}
-        if photo_base64 and len(photo_base64) <= THUMBNAIL_MAX_CHARS:
-            payload["photo"] = photo_base64
-
-        points = [
-            PointStruct(
-                id=abs(hash(f"{name}_{i}")) % (2**63),
-                vector=self.normalize(embedding).tolist(),
-                payload=payload,
-            )
-            for i, embedding in enumerate(embeddings)
-        ]
-        self.client.upsert(collection_name=QDRANT_COLLECTION, points=points)
+        if photo_base64 and len(photo_base64) > THUMBNAIL_MAX_CHARS:
+            photo_base64 = None
+        self.store.replace(name, [self.normalize(e) for e in embeddings], photo_base64)
 
 
 class FaceRecognitionService:
