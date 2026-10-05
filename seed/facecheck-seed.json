@@ -1,0 +1,198 @@
+{
+  "_meta": {
+    "description": "Sample (mock) responses for the FaceCheck.ID API, shaped from its OpenAPI spec (https://facecheck.id/swagger/v1/swagger.json). All people, URLs, GUIDs and images are fictional.",
+    "baseUrl": "https://facecheck.id",
+    "auth": "Authorization: <API_TOKEN> header on every request",
+    "notes": [
+      "Only fields in the OpenAPI schema are used. 'code' and 'error' string values are illustrative; confirm real values against live responses.",
+      "base64 fields are shortened placeholders, not real images.",
+      "FaceCheck.ID is a reverse face search over public web images, not a 1:1 verification service. Match urls point to third-party pages."
+    ],
+    "scenarios": ["info", "upload_pic", "search", "delete_pic", "app_level_results"]
+  },
+
+  "info": {
+    "POST /api/info": {
+      "ok": {
+        "status": 200,
+        "body": { "faces": 212417831, "is_online": true, "remaining_credits": 394, "has_credits_to_search": true }
+      },
+      "low_credits": {
+        "status": 200,
+        "body": { "faces": 212417831, "is_online": true, "remaining_credits": 2, "has_credits_to_search": false }
+      },
+      "engine_offline": {
+        "status": 200,
+        "body": { "faces": 212417831, "is_online": false, "remaining_credits": 394, "has_credits_to_search": true }
+      }
+    }
+  },
+
+  "upload_pic": {
+    "POST /api/upload_pic": {
+      "request_example": {
+        "contentType": "multipart/form-data",
+        "fields": { "images": "<file: visitor-selfie.jpg>", "id_search": "", "reset_prev_images": true }
+      },
+      "face_found": {
+        "status": 200,
+        "body": {
+          "id_search": "7kd2m1-v_9AXQ31C0E5B8F2D",
+          "message": "1 image uploaded",
+          "progress": null,
+          "error": null,
+          "code": "OK",
+          "output": null,
+          "input": [
+            { "base64": "data:image/webp;base64,UklGRiQAAABXRUJQ...", "id_pic": "pic_0001", "url_source": null, "svg_anim": null }
+          ],
+          "facemon_status": null
+        }
+      },
+      "no_face_detected": {
+        "status": 200,
+        "body": {
+          "id_search": null,
+          "message": "No face detected in the image",
+          "progress": null,
+          "error": "NO_FACE_DETECTED",
+          "code": "ERROR",
+          "output": null,
+          "input": null
+        }
+      },
+      "unauthorized": {
+        "status": 401,
+        "body": { "error": "Invalid or missing API token" }
+      }
+    }
+  },
+
+  "search": {
+    "POST /api/search": {
+      "request_examples": {
+        "start_search_demo": { "id_search": "7kd2m1-v_9AXQ31C0E5B8F2D", "with_progress": true, "status_only": false, "demo": true },
+        "poll_progress": { "id_search": "7kd2m1-v_9AXQ31C0E5B8F2D", "with_progress": true, "status_only": true, "demo": true },
+        "start_search_production": { "id_search": "7kd2m1-v_9AXQ31C0E5B8F2D", "with_progress": false, "status_only": false, "demo": false }
+      },
+      "in_progress": {
+        "status": 200,
+        "body": {
+          "id_search": "7kd2m1-v_9AXQ31C0E5B8F2D",
+          "message": "Searching",
+          "progress": 42,
+          "error": null,
+          "code": "PROGRESS",
+          "output": null
+        }
+      },
+      "completed_with_matches": {
+        "status": 200,
+        "body": {
+          "id_search": "7kd2m1-v_9AXQ31C0E5B8F2D",
+          "message": "Search completed",
+          "progress": 100,
+          "error": null,
+          "code": "OK",
+          "output": {
+            "items": [
+              { "guid": "a1f0c2e4-0001-4b1a-9c11-000000000001", "score": 91, "group": 1, "index": 0, "indexDB": 10482211, "seen": 3,
+                "base64": "data:image/webp;base64,UklGRkIAAABXRUJQ...",
+                "url": { "value": "https://example-social.test/profiles/sara-example" } },
+              { "guid": "a1f0c2e4-0002-4b1a-9c11-000000000002", "score": 76, "group": 1, "index": 1, "indexDB": 10482977, "seen": 1,
+                "base64": "data:image/webp;base64,UklGRkIAAABXRUJQ...",
+                "url": { "value": "https://example-news.test/articles/conference-photos" } },
+              { "guid": "a1f0c2e4-0003-4b1a-9c11-000000000003", "score": 58, "group": 2, "index": 2, "indexDB": 20931002, "seen": 1,
+                "base64": "data:image/webp;base64,UklGRkIAAABXRUJQ...",
+                "url": { "value": "https://example-blog.test/team-page" } }
+            ],
+            "tookSeconds": 14.8,
+            "tookSecondsDownload": 0.6,
+            "tookSecondsQueue": 1.9,
+            "searchedFaces": 212417831,
+            "demo": false
+          },
+          "input": [ { "base64": "data:image/webp;base64,UklGRiQAAABXRUJQ...", "id_pic": "pic_0001", "url_source": null, "svg_anim": null } ]
+        }
+      },
+      "completed_demo_mode": {
+        "status": 200,
+        "body": {
+          "id_search": "7kd2m1-v_9AXQ31C0E5B8F2D",
+          "message": "Search completed (demo)",
+          "progress": 100,
+          "error": null,
+          "code": "OK",
+          "output": {
+            "items": [
+              { "guid": "demo-0001", "score": 64, "group": 1, "index": 0, "indexDB": 5, "seen": 1,
+                "base64": "data:image/webp;base64,UklGRkIAAABXRUJQ...",
+                "url": { "value": "https://example-demo.test/face/1" } }
+            ],
+            "tookSeconds": 2.1,
+            "searchedFaces": 100000,
+            "demo": true
+          }
+        }
+      },
+      "completed_no_matches": {
+        "status": 200,
+        "body": {
+          "id_search": "7kd2m1-v_9AXQ31C0E5B8F2D",
+          "message": "Search completed",
+          "progress": 100,
+          "error": null,
+          "code": "OK",
+          "output": { "items": [], "tookSeconds": 12.3, "searchedFaces": 212417831, "demo": false }
+        }
+      },
+      "insufficient_credits": {
+        "status": 200,
+        "body": {
+          "id_search": "7kd2m1-v_9AXQ31C0E5B8F2D",
+          "message": "Not enough credits. A search costs 3 credits.",
+          "progress": null,
+          "error": "INSUFFICIENT_CREDITS",
+          "code": "ERROR",
+          "output": null
+        }
+      },
+      "unknown_search_id": {
+        "status": 200,
+        "body": {
+          "id_search": "does-not-exist",
+          "message": "Search not found or expired (searches are kept 24 hours)",
+          "progress": null,
+          "error": "SEARCH_NOT_FOUND",
+          "code": "ERROR",
+          "output": null
+        }
+      }
+    }
+  },
+
+  "delete_pic": {
+    "POST /api/delete_pic": {
+      "removed": {
+        "status": 200,
+        "body": {
+          "id_search": "7kd2m1-v_9AXQ31C0E5B8F2D",
+          "message": "Image removed",
+          "progress": null,
+          "error": null,
+          "code": "OK",
+          "input": []
+        }
+      }
+    }
+  },
+
+  "app_level_results": {
+    "_comment": "What OUR backend returns to the agent after applying our own rules to the raw FaceCheck output. The agent never receives raw match URLs or images.",
+    "visitor_check_flow": {
+      "no_review_needed": { "visitorRequestId": "vr_1001", "searchId": "7kd2m1-v_9AXQ31C0E5B8F2D", "topScore": 0, "matchCount": 0, "decision": "no_flag", "creditsUsed": 3, "searchDeletedAt": "2026-10-02T10:20:00Z" },
+      "needs_human_review": { "visitorRequestId": "vr_1002", "searchId": "9ab3qq-v_11CC44D0E5B8A77", "topScore": 91, "matchCount": 3, "decision": "manual_review", "reviewer": "security@example.test", "creditsUsed": 3, "searchDeletedAt": "2026-10-02T10:35:00Z" },
+      "service_unavailable": { "visitorRequestId": "vr_1003", "decision": "skipped", "reason": "facecheck_offline_or_no_credits", "fallback": "manual_id_check" }
+    }
+  }
+}

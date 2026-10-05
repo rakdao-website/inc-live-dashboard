@@ -178,6 +178,9 @@ class Visitor(Base):
     # Spacebring customer (membership) ID. Nullable: everyone books as an
     # anonymous visitor until the team decides how customers are identified.
     spacebring_customer_id: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    # Email of the Spacebring company manager (the license holder). Finds the
+    # person's Spacebring company; equal to visitor_email for the license holder.
+    manager_email: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
     face_consent_given: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,

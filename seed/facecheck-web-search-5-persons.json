@@ -1,0 +1,154 @@
+{
+  "_meta": {
+    "description": "Sample FaceCheck.ID POST /api/search response for an unknown visitor: 5 web matches, best first. All people, names and URLs are fictional (*.example.test).",
+    "shape": "Follows the OpenAPI schema at https://facecheck.id/swagger/v1/swagger.json (Search_Results / SearchItem). score is 0-100; our app divides by 100 (face_web_search.py).",
+    "notes": [
+      "In the OpenAPI schema SearchItem.url is an object {\"value\": \"...\"} (MaskedUrl), while face_web_search.py reads item.get('url') as a string. Check a real response; if it is an object the app stores a dict as source_url.",
+      "base64 is a 1x1 placeholder PNG, not a real thumbnail.",
+      "The names below are for readability only. The real API returns no names, only page URLs, scores and thumbnails.",
+      "Our app keeps the top 3 (limit=3); this file has 5 to test the cut-off."
+    ]
+  },
+  "request": {
+    "POST /api/search": {
+      "id_search": "7kd2m1-v_9AXQ31C0E5B8F2D",
+      "with_progress": false,
+      "status_only": false,
+      "demo": false
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "id_search": "7kd2m1-v_9AXQ31C0E5B8F2D",
+      "message": "Search completed",
+      "progress": 100,
+      "error": null,
+      "code": "OK",
+      "output": {
+        "items": [
+          {
+            "guid": "b7c1e2a0-0001-4d2f-8a11-000000000001",
+            "score": 94,
+            "group": 1,
+            "index": 0,
+            "indexDB": 10482211,
+            "seen": 3,
+            "base64": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+            "url": {
+              "value": "https://linkedin.example.test/in/layla-haddad-dubai"
+            }
+          },
+          {
+            "guid": "b7c1e2a0-0002-4d2f-8a11-000000000002",
+            "score": 88,
+            "group": 1,
+            "index": 1,
+            "indexDB": 10490130,
+            "seen": 2,
+            "base64": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+            "url": {
+              "value": "https://instagram.example.test/omar.almansoori"
+            }
+          },
+          {
+            "guid": "b7c1e2a0-0003-4d2f-8a11-000000000003",
+            "score": 81,
+            "group": 2,
+            "index": 2,
+            "indexDB": 10498049,
+            "seen": 1,
+            "base64": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+            "url": {
+              "value": "https://news.example.test/business/startup-summit-2025-speakers"
+            }
+          },
+          {
+            "guid": "b7c1e2a0-0004-4d2f-8a11-000000000004",
+            "score": 73,
+            "group": 3,
+            "index": 3,
+            "indexDB": 10505968,
+            "seen": 1,
+            "base64": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+            "url": {
+              "value": "https://company.example.test/about/our-team"
+            }
+          },
+          {
+            "guid": "b7c1e2a0-0005-4d2f-8a11-000000000005",
+            "score": 64,
+            "group": 4,
+            "index": 4,
+            "indexDB": 10513887,
+            "seen": 1,
+            "base64": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+            "url": {
+              "value": "https://blog.example.test/community/meetup-recap-photos"
+            }
+          }
+        ],
+        "tookSeconds": 14.8,
+        "tookSecondsDownload": 0.6,
+        "tookSecondsQueue": 1.9,
+        "searchedFaces": 212417831,
+        "demo": false
+      },
+      "input": [
+        {
+          "base64": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+          "id_pic": "pic_0001",
+          "url_source": null,
+          "svg_anim": null
+        }
+      ]
+    }
+  },
+  "expected_app_parse_top3": [
+    {
+      "rank": 1,
+      "source_url": "https://linkedin.example.test/in/layla-haddad-dubai",
+      "score": 0.94,
+      "thumbnail_base64": "<same as base64>"
+    },
+    {
+      "rank": 2,
+      "source_url": "https://instagram.example.test/omar.almansoori",
+      "score": 0.88,
+      "thumbnail_base64": "<same as base64>"
+    },
+    {
+      "rank": 3,
+      "source_url": "https://news.example.test/business/startup-summit-2025-speakers",
+      "score": 0.81,
+      "thumbnail_base64": "<same as base64>"
+    }
+  ],
+  "people_for_reference": [
+    {
+      "index": 0,
+      "fictional_name": "Layla Haddad",
+      "page_type": "Profile photo"
+    },
+    {
+      "index": 1,
+      "fictional_name": "Omar Al Mansoori",
+      "page_type": "Social post"
+    },
+    {
+      "index": 2,
+      "fictional_name": "Priya Menon",
+      "page_type": "Event speaker page"
+    },
+    {
+      "index": 3,
+      "fictional_name": "Daniel Brooks",
+      "page_type": "Company team page"
+    },
+    {
+      "index": 4,
+      "fictional_name": "Sara Khalid",
+      "page_type": "Blog photo gallery"
+    }
+  ]
+}

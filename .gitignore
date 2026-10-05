@@ -27,3 +27,6 @@ docs/admin_backend_mvp_notes.md
 logs/
 
 node_modules/
+
+# Real people, photos and consent data: never commit
+seed/private/

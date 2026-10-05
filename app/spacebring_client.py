@@ -137,6 +137,24 @@ class SpacebringClient:
             json={"startDate": to_spacebring_datetime(start), "endDate": to_spacebring_datetime(end)},
         )
 
+    # --- customers ---------------------------------------------------------
+    def find_memberships(
+        self,
+        *,
+        email: str,
+        company_id: str | None = None,
+        location_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Memberships (customers) with this user email, optionally within one company."""
+        params: dict[str, Any] = {
+            "locationRef": location_id or self.location_id,
+            "userEmail": email,
+            "limit": 100,
+        }
+        if company_id:
+            params["companyRef"] = company_id
+        return self._request("GET", "/community/memberships/v1", params=params).get("memberships", [])
+
     # --- bookings --------------------------------------------------------
     def create_booking(
         self,

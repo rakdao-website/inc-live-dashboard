@@ -1,0 +1,5 @@
+full_name,phone,email,person_type,company_name,license_number,company_number,manager_email,photo_urls,photo_paths,consent_given,consent_date,consent_source
+Layla Haddad,+971500000101,layla.haddad@example.test,employee,Innovation City,,,,,layla-haddad,yes,2026-10-05,signed-form-E-001
+Priya Menon,+971500000201,priya@menonmedia.example.test,client,Menon Media FZ-LLC,LIC-20441,CN-20441,priya@menonmedia.example.test,https://files.example.test/p/priya-1.jpg|https://files.example.test/p/priya-2.jpg,,yes,2026-10-06,kiosk-consent
+Karim Saad,+971500000204,karim@menonmedia.example.test,client,Menon Media FZ-LLC,,CN-20441,priya@menonmedia.example.test,,karim/front.jpg|karim/side.jpg,yes,2026-10-06,kiosk-consent
+Sara Khalid,+971500000203,sara@khalidstudio.example.test,client,Khalid Studio,LIC-20630,CN-20630,sara@khalidstudio.example.test,,,no,,

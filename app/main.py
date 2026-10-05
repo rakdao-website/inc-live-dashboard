@@ -14,6 +14,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.admin import admin_login, router as admin_router
 from app.config import settings
 from app.database import Base, SessionLocal, check_database_connection, engine
+from app.face_recognition_service import ensure_pgvector_schema
 from app.spacebring_client import spacebring_enabled
 from app.face_recognition_service import FaceRecognitionUnavailable, get_face_recognition_service
 from app.routers.face import router as face_router
@@ -85,6 +86,10 @@ async def spacebring_sync_loop() -> None:
 async def lifespan(_: FastAPI):
     if settings.auto_create_tables:
         Base.metadata.create_all(bind=engine)
+        try:
+            ensure_pgvector_schema(engine)
+        except Exception as exc:  # pgvector not installed: face matching will report it
+            logger.warning("Could not prepare the pgvector face table: %s", exc)
     if settings.seed_sample_data:
         with SessionLocal() as db:
             seed_sample_data(db)

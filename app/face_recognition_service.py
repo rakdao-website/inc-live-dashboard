@@ -100,6 +100,32 @@ class PgVectorStore:
             db.commit()
 
 
+def ensure_pgvector_schema(engine) -> None:
+    """Create the vector extension and face_vectors table if missing (idempotent).
+
+    Used with AUTO_CREATE_TABLES so a fresh database works without running the
+    SQL migration by hand. The extension must be installed on the server.
+    """
+    statements = [
+        "CREATE EXTENSION IF NOT EXISTS vector",
+        """CREATE TABLE IF NOT EXISTS face_vectors (
+            face_vector_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            face_identifier VARCHAR(160) NOT NULL,
+            visitor_id BIGINT REFERENCES visitors(visitor_id),
+            embedding vector(512) NOT NULL,
+            photo_base64 TEXT,
+            model_name VARCHAR(40) NOT NULL DEFAULT 'buffalo_l',
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_face_vectors_identifier ON face_vectors(face_identifier)",
+        "CREATE INDEX IF NOT EXISTS idx_face_vectors_visitor ON face_vectors(visitor_id)",
+        "CREATE INDEX IF NOT EXISTS idx_face_vectors_embedding_hnsw ON face_vectors USING hnsw (embedding vector_cosine_ops)",
+    ]
+    with engine.begin() as connection:
+        for statement in statements:
+            connection.execute(text(statement))
+
+
 def _visitor_id_from_identifier(name: str) -> int | None:
     prefix, _, rest = name.partition(":")
     return int(rest) if prefix == "visitor" and rest.isdigit() else None
