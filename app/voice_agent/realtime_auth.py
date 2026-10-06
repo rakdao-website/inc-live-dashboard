@@ -22,6 +22,7 @@ extracted defensively below.
 import httpx
 from fastapi import APIRouter, HTTPException
 
+from app import runtime_settings
 from app.config import settings
 from app.voice_agent.knowledge_base_loader import load_knowledge_base as _load_knowledge_base
 from app.voice_agent.utils.logger import log_error, log_info
@@ -67,9 +68,9 @@ async def create_realtime_session():
     payload = {
         "session": {
             "type": "realtime",
-            "model": settings.openai_realtime_model,
+            "model": runtime_settings.get("voice.realtime_model"),
             "audio": {
-                "output": {"voice": settings.openai_realtime_voice},
+                "output": {"voice": runtime_settings.get("voice.voice")},
             },
         }
     }
@@ -109,6 +110,6 @@ async def create_realtime_session():
 
     return {
         "client_secret": client_secret,
-        "model": settings.openai_realtime_model,
+        "model": runtime_settings.get("voice.realtime_model"),
         "raw": data,  # included for debugging while verifying the response shape; remove once confirmed
     }

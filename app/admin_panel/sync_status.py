@@ -25,3 +25,17 @@ def record_error(message: str) -> None:
 def snapshot() -> dict:
     with _lock:
         return dict(_state)
+
+
+def run_spacebring_sync(db):
+    """One sync pass. Records the outcome for the dashboard and re-raises failures."""
+    from app.spacebring_client import get_spacebring_client
+    from app.spacebring_sync import sync_bookings
+
+    try:
+        result = sync_bookings(db, get_spacebring_client())
+    except Exception as exc:
+        record_error(str(exc))
+        raise
+    record_ok(result)
+    return result

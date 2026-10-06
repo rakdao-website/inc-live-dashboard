@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
-from app import face_web_search
+from app import face_web_search, runtime_settings
 from app.admin_panel import sync_status
 from app.admin_panel.models import VisitorApproval
 from app.admin_panel.deps import admin_gate
@@ -44,7 +44,7 @@ def dashboard_summary(db: Session = Depends(get_db)):
 
     facecheck = face_web_search.get_account_info() if face_web_search.is_enabled() else {
         "enabled": False,
-        "demo_mode": bool(settings.face_web_search_testing_mode),
+        "demo_mode": bool(runtime_settings.get("face.web_search_demo_mode")),
         "credit_cost": settings.face_web_search_credit_cost,
         "credits_remaining": None,
         "online": None,

@@ -19,7 +19,13 @@ VENDOR_PATH = Path(__file__).with_name("vendor")
 #                                 FaceCheckID's top 3 web results instead of
 #                                 comparing this face against other enrolled
 #                                 visitors.
-MATCH_THRESHOLD = 0.60
+MATCH_THRESHOLD = 0.60  # default; the live value is the "face.match_threshold" runtime setting
+
+
+def match_threshold() -> float:
+    from app import runtime_settings
+
+    return runtime_settings.get("face.match_threshold")
 
 MODEL_NAME = "buffalo_l"
 PROVIDERS = ["CPUExecutionProvider"]
@@ -156,7 +162,7 @@ class FaceDatabase:
             FaceMatch(
                 name=row["name"],
                 score=row["score"],
-                recognized=row["score"] >= MATCH_THRESHOLD,
+                recognized=row["score"] >= match_threshold(),
                 photo_base64=row["photo"],
             )
             for row in self.store.search(query, top_k)
@@ -296,7 +302,7 @@ class FaceRecognitionService:
         matches = self.database.match(average_embedding, top_k=1)
         best = matches[0] if matches else None
 
-        if best is not None and best.score >= MATCH_THRESHOLD:
+        if best is not None and best.score >= match_threshold():
             return FaceRecognitionResult(
                 status="recognized",
                 best_match=best,

@@ -540,6 +540,7 @@ All responses use the envelope `{ success, message, data }` or `{ success:false,
 | `ADMIN_SESSION_SECRET` | empty | Signs admin session cookies (32+ chars). Required when `ENVIRONMENT=production`; the API refuses to start without it |
 | `ADMIN_SESSION_TTL_MINUTES`, `ADMIN_COOKIE_SECURE`, `ADMIN_LOGIN_MAX_ATTEMPTS`, `ADMIN_LOGIN_WINDOW_SECONDS` | `480`, `false`, `5`, `900` | Session length, HTTPS-only cookie, login rate limit |
 | `CORS_ALLOWED_ORIGINS` | local dev origins | Comma-separated origins allowed with cookies (no `null`) |
+| *Admin panel → Settings* | n/a | Voice model and voice, room-answer provider, face threshold, FaceCheck.ID on/off, demo mode and photos per search, kiosk scan duration and photo counts, Spacebring sync on/off and interval, opening hours. Stored in `app_settings`; a missing row means the `.env` default. Keys and tokens stay in `.env`. |
 | `SPACEBRING_ENVIRONMENT` | `sandbox` | Label shown in the admin panel (`sandbox` or `live`) |
 | `FACE_WEB_SEARCH_CREDIT_COST` | `3` | Credits one FaceCheck.ID search uses, shown before a re-run |
 | `FACE_WEB_SEARCH_ENABLED` | `false` | Master switch for FaceCheck.ID |

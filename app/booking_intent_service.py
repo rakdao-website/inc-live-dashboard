@@ -6,6 +6,7 @@ import dateparser
 from dateparser.search import search_dates
 from sqlalchemy.orm import Session
 
+from app import runtime_settings
 from app.config import settings
 from app.kiosk_flow_services import service_to_booking_defaults
 from app.room_question_service import build_room_directory,find_room_in_question
@@ -118,9 +119,9 @@ async def _parse_date_time_llm(transcript: str) -> tuple[date | None, time_type 
 
     raw = None
     try:
-        if settings.room_question_provider == "gemini" and settings.gemini_api_key:
+        if runtime_settings.get("voice.text_provider") == "gemini" and settings.gemini_api_key:
             raw = await _call_gemini(prompt)
-        elif settings.room_question_provider == "grok" and settings.xai_api_key:
+        elif runtime_settings.get("voice.text_provider") == "grok" and settings.xai_api_key:
             raw = await _call_grok(prompt)
     except Exception as exc:  # noqa: BLE001
         print(f"Booking date/time LLM fallback failed: {exc}")

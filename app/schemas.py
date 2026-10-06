@@ -3,7 +3,7 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.operating_hours import OPERATING_HOURS_MESSAGE, is_within_operating_hours
+from app.operating_hours import is_within_operating_hours, operating_hours_message
 
 
 # ============================================================
@@ -119,7 +119,7 @@ class BookingCreate(BaseModel):
         if self.booking_time_end <= self.booking_time_start:
             raise ValueError("booking_time_end must be after booking_time_start")
         if not is_within_operating_hours(self.booking_time_start, self.booking_time_end):
-            raise ValueError(OPERATING_HOURS_MESSAGE)
+            raise ValueError(operating_hours_message())
         if self.booking_date is None:
             self.booking_date = self.booking_start_date
         return self
@@ -159,7 +159,7 @@ class BookingUpdate(BaseModel):
             and self.booking_time_end is not None
             and not is_within_operating_hours(self.booking_time_start, self.booking_time_end)
         ):
-            raise ValueError(OPERATING_HOURS_MESSAGE)
+            raise ValueError(operating_hours_message())
         return self
 
 
@@ -323,7 +323,7 @@ class EventCreate(BaseModel):
         if self.event_time_end <= self.event_time_start:
             raise ValueError("event_time_end must be after event_time_start")
         if not is_within_operating_hours(self.event_time_start, self.event_time_end):
-            raise ValueError(OPERATING_HOURS_MESSAGE)
+            raise ValueError(operating_hours_message())
         if self.event_location is None or not self.event_location.strip():
             self.event_location = DEFAULT_EVENT_LOCATION
         return self
@@ -352,7 +352,7 @@ class EventUpdate(BaseModel):
             and self.event_time_end is not None
             and not is_within_operating_hours(self.event_time_start, self.event_time_end)
         ):
-            raise ValueError(OPERATING_HOURS_MESSAGE)
+            raise ValueError(operating_hours_message())
         return self
 
 

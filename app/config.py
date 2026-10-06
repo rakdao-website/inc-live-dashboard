@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_realtime_model: str = "gpt-realtime-2.1"
     openai_realtime_voice: str = "marin"
+    # Models offered in the admin panel dropdown (the current model is always included).
+    openai_realtime_model_choices: str = "gpt-realtime-2.1,gpt-realtime,gpt-realtime-mini"
 
 
 

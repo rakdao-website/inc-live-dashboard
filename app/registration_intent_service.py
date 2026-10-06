@@ -2,6 +2,7 @@ import json
 import re
 from datetime import datetime
 import httpx
+from app import runtime_settings
 from app.config import settings
 from app.kiosk_flow_services import normalize_phone
 
@@ -89,9 +90,9 @@ async def   _extract_name_and_company_llm(masked_transcript: str) -> dict:
     )
     raw = None
     try:
-        if settings.room_question_provider == "gemini" and settings.gemini_api_key:
+        if runtime_settings.get("voice.text_provider") == "gemini" and settings.gemini_api_key:
             raw = await _call_gemini(prompt)
-        elif settings.room_question_provider == "grok" and settings.xai_api_key:
+        elif runtime_settings.get("voice.text_provider") == "grok" and settings.xai_api_key:
             raw = await _call_grok(prompt)
     except Exception as exc:  # noqa: BLE001
         print(f"Name/company LLM extraction failed: {exc}")

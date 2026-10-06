@@ -18,7 +18,7 @@ R = {READ}
 
 ALL_RESOURCES = (
     "dashboard", "approvals", "captures", "people", "erasure", "bookings", "rooms",
-    "events", "activity", "ecosystem", "audit", "integrations", "privacy", "users",
+    "events", "activity", "ecosystem", "audit", "integrations", "privacy", "users", "settings",
 )
 
 ROLE_PERMISSIONS: dict[str, dict[str, set[str]]] = {
@@ -57,6 +57,7 @@ _PATH_RESOURCES: tuple[tuple[str, str], ...] = (
     ("/admin/dashboard", "dashboard"),
     ("/admin/approvals", "approvals"),
     ("/admin/users", "users"),
+    ("/admin/settings", "settings"),
     ("/admin/audit-log", "audit"),
     ("/admin/integrations", "integrations"),
     ("/admin/privacy", "privacy"),

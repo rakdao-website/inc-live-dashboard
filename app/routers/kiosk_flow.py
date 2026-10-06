@@ -9,7 +9,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app import face_unknown_capture
+from app import face_unknown_capture, runtime_settings
 from app.admin_panel.models import VisitorApproval
 from app.admin_panel.pending import create_pending_visitor
 from app.config import settings
@@ -65,7 +65,7 @@ from app.models import (
     Visitor,
     Zone,
 )
-from app.operating_hours import OPERATING_HOURS_MESSAGE, is_within_operating_hours
+from app.operating_hours import is_within_operating_hours, operating_hours_message
 from app.spacebring_booking_service import (
     SlotUnavailable,
     cancel_quietly,
@@ -351,6 +351,23 @@ def recognize_face(
         message="Face recognition completed",
         data=data.model_dump(),
     )
+
+@router.get("/config")
+def get_kiosk_config():
+    """Public, non-secret settings the kiosk screen reads on load (set in the admin panel)."""
+    open_time, close_time = runtime_settings.operating_hours()
+    return success_response(
+        message="Kiosk configuration",
+        data={
+            "face_scan": {
+                "duration_ms": runtime_settings.get("scan.duration_ms"),
+                "recognition_photos": runtime_settings.get("scan.recognition_photos"),
+                "enrolment_photos": runtime_settings.get("scan.enrolment_photos"),
+            },
+            "operating_hours": {"open": open_time.strftime("%H:%M"), "close": close_time.strftime("%H:%M")},
+        },
+    )
+
 
 @router.get("/visitor-by-phone")
 def get_visitor_by_phone(
@@ -866,7 +883,7 @@ def create_kiosk_booking(
 
     if not is_within_operating_hours(payload.booking_time_start, end_time):
         return bad_request_response(
-            message=OPERATING_HOURS_MESSAGE,
+            message=operating_hours_message(),
             error_code="OUTSIDE_OPERATING_HOURS",
         )
 
@@ -1038,7 +1055,7 @@ def check_room_availability(
             error_code="BOOKING_ENDS_AFTER_MIDNIGHT",
         )
     if not is_within_operating_hours(booking_time_start, end_time):
-        return bad_request_response(message=OPERATING_HOURS_MESSAGE, error_code="OUTSIDE_OPERATING_HOURS")
+        return bad_request_response(message=operating_hours_message(), error_code="OUTSIDE_OPERATING_HOURS")
 
     reason = None
     if uses_spacebring(zone):
@@ -1118,7 +1135,7 @@ def reschedule_kiosk_booking(
             error_code="BOOKING_ENDS_AFTER_MIDNIGHT",
         )
     if not is_within_operating_hours(new_start, new_end):
-        return bad_request_response(message=OPERATING_HOURS_MESSAGE, error_code="OUTSIDE_OPERATING_HOURS")
+        return bad_request_response(message=operating_hours_message(), error_code="OUTSIDE_OPERATING_HOURS")
 
     zone = db.get(Zone, booking.zone_id)
     if booking.spacebring_booking_id:

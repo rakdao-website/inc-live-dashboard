@@ -2,7 +2,7 @@ from datetime import date, datetime, time
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.operating_hours import OPERATING_HOURS_MESSAGE, is_within_operating_hours
+from app.operating_hours import is_within_operating_hours, operating_hours_message
 
 
 class ZoneRead(BaseModel):
@@ -83,7 +83,7 @@ class ScreenBookingCreate(BaseModel):
         if self.booking_time_end <= self.booking_time_start:
             raise ValueError("booking_time_end must be after booking_time_start")
         if not is_within_operating_hours(self.booking_time_start, self.booking_time_end):
-            raise ValueError(OPERATING_HOURS_MESSAGE)
+            raise ValueError(operating_hours_message())
         return self
 
 

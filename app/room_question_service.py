@@ -16,6 +16,7 @@ from datetime import date
 import httpx
 from sqlalchemy.orm import Session
 
+from app import runtime_settings
 from app.config import settings
 from app.models import Booking
 from app.services import zones_with_status
@@ -320,9 +321,9 @@ async def answer_room_question(db: Session, question: str, visitor_id: int | Non
         return _booking_request_response(visitor_id), "scripted"
 
     try:
-        if settings.room_question_provider == "gemini" and settings.gemini_api_key:
+        if runtime_settings.get("voice.text_provider") == "gemini" and settings.gemini_api_key:
             return await _ask_gemini(question, rooms), "llm"
-        if settings.room_question_provider == "grok" and settings.xai_api_key:
+        if runtime_settings.get("voice.text_provider") == "grok" and settings.xai_api_key:
             return await _ask_grok(question, rooms), "llm"
     except Exception as exc:  # noqa: BLE001 - any provider failure falls back
         print(f"Room-question LLM call failed, falling back to scripted matcher: {exc}")

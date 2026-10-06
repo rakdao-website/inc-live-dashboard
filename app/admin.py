@@ -28,7 +28,7 @@ from app.models import (
     VisitorCheckIn,
     Zone,
 )
-from app.operating_hours import OPERATING_HOURS_MESSAGE, is_within_operating_hours
+from app.operating_hours import is_within_operating_hours, operating_hours_message
 from app.schemas import (
     AdminZoneRead,
     BookingCreate,
@@ -508,7 +508,7 @@ def update_event(
 
     if not is_within_operating_hours(target_start, target_end):
         return bad_request_response(
-            message=OPERATING_HOURS_MESSAGE,
+            message=operating_hours_message(),
             error_code="OUTSIDE_OPERATING_HOURS",
         )
 
@@ -748,7 +748,7 @@ def update_booking(
 
     if not is_within_operating_hours(target_start, target_end):
         return bad_request_response(
-            message=OPERATING_HOURS_MESSAGE,
+            message=operating_hours_message(),
             error_code="OUTSIDE_OPERATING_HOURS",
         )
 

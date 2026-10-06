@@ -24,6 +24,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from app import runtime_settings
 from app.config import settings
 
 FACECHECK_SITE = "https://facecheck.id"
@@ -48,7 +49,7 @@ class WebFaceMatch:
 
 def is_enabled() -> bool:
     return bool(
-        settings.face_web_search_enabled
+        runtime_settings.get("face.web_search_enabled")
         and settings.face_web_search_provider == "facecheck"
         and settings.facecheck_api_token
     )
@@ -100,7 +101,7 @@ def _upload_image(client: httpx.Client, headers: dict, image_bytes: bytes, id_se
 
 def _search_facecheck(images_bytes: list[bytes], *, limit: int) -> list[WebFaceMatch]:
     headers = {"accept": "application/json", "Authorization": settings.facecheck_api_token}
-    testing_mode = settings.face_web_search_testing_mode
+    testing_mode = runtime_settings.get("face.web_search_demo_mode")
 
     with httpx.Client(timeout=UPLOAD_TIMEOUT_SECONDS) as client:
         id_search = ""
@@ -165,7 +166,7 @@ def get_account_info() -> dict:
     """
     info = {
         "enabled": is_enabled(),
-        "demo_mode": bool(settings.face_web_search_testing_mode),
+        "demo_mode": bool(runtime_settings.get("face.web_search_demo_mode")),
         "credit_cost": settings.face_web_search_credit_cost,
         "credits_remaining": None,
         "online": None,

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from app import face_gallery, face_web_search
+from app import face_gallery, face_web_search, runtime_settings
 from app.config import settings
 from app.face_recognition_service import get_face_recognition_service
 from app.face_web_search import WebFaceSearchUnavailable
@@ -141,7 +141,7 @@ def create_capture_with_web_search(
         # (not just the single "best" one) so FaceCheckID has multiple photos
         # of the same person to match against -- set to 1 in .env if multiple
         # images turn out to cost extra credits per search.
-        max_images = max(1, getattr(settings, "face_web_search_max_images", 1))
+        max_images = max(1, runtime_settings.get("face.web_search_max_images"))
         frames_to_send = (all_image_bytes or [image_bytes])[:max_images]
         run_facecheck_search(db, capture, frames_to_send)
 
