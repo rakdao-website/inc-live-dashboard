@@ -11,9 +11,26 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/INC_live_dashboard"
     auto_create_tables: bool = False
     seed_sample_data: bool = False
-    admin_username: str = "admin"
-    admin_password: str = "admin123"
-    admin_role: str = "super_user"
+
+    # Admin panel sessions. The secret signs the session cookie; it has no
+    # default so production cannot start with a guessable one (see
+    # app/admin_panel/security.py). Admin users live in the admin_users table
+    # and are created with scripts/create_admin_user.py.
+    admin_session_secret: str = ""
+    admin_session_ttl_minutes: int = 480
+    admin_cookie_name: str = "inc_admin_session"
+    admin_cookie_secure: bool = False  # set true behind HTTPS
+    admin_login_max_attempts: int = 5
+    admin_login_window_seconds: int = 900
+    # Comma-separated browser origins allowed to call the API with cookies.
+    cors_allowed_origins: str = (
+        "http://localhost:3001,http://127.0.0.1:3001,"
+        "http://localhost:3002,http://127.0.0.1:3002,"
+        "http://localhost:3003,http://127.0.0.1:3003,"
+        "http://localhost:8000,http://127.0.0.1:8000,"
+        "http://localhost:5500,http://127.0.0.1:5500,"
+        "http://localhost:5173,http://127.0.0.1:5173"
+    )
 
     # Room Q&A brain. "scripted" needs no key and is the default; set to
     # "gemini" or "grok" and supply the matching key via .env to enable it.
@@ -38,9 +55,12 @@ class Settings(BaseSettings):
     facecheck_api_token: str = ""
     # Testing mode returns inaccurate results but does not consume credits.
     face_web_search_testing_mode: bool = False
+    face_web_search_credit_cost: int = 3  # FaceCheck.ID credits one search consumes
     face_web_search_max_images: int = 3  # confirmed: multiple photos of the same person don't cost extra FaceCheck.ID credits
     
     # Spacebring REST API (Basic auth). Sandbox credentials first, prod later.
+    # Label shown in the admin panel: "sandbox" or "live". Set it to match the credentials.
+    spacebring_environment: str = "sandbox"
     spacebring_base_url: str = "https://api.spacebring.com"
     spacebring_client_id: str = ""
     spacebring_client_secret: str = ""

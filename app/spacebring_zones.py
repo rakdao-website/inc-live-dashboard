@@ -21,6 +21,7 @@ ZONE_TO_SPACEBRING_TITLE: dict[str, str] = {
 
 # Rooms the TikTok service may book (the kiosk picks one of these).
 TIKTOK_ZONE_IDS: tuple[str, ...] = ("TTS_1", "TTS_2", "TTS_3", "TTS_4", "TTS_5")
+PODCAST_ZONE_IDS: tuple[str, ...] = ("POD_1",)
 
 
 def sync_zone_resource_ids(db: Session, rooms: list[dict]) -> dict[str, list[str]]:

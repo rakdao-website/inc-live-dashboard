@@ -50,3 +50,8 @@ class LinkCaptureRequest(BaseModel):
     email: Optional[str] = Field(default=None, max_length=150)
     visitor_type: Literal["client", "visitor"] = "visitor"
     enroll_face: bool = True
+    consent_confirmed: bool = False  # staff attest the person consented to face recognition
+
+
+class RerunSearchRequest(BaseModel):
+    confirm_credit_cost: bool = False

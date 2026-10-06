@@ -11,7 +11,16 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.admin import admin_login, router as admin_router
+from app.admin import router as admin_router
+from app.admin_panel import sync_status
+from app.admin_panel.audit import AdminAuditMiddleware
+from app.admin_panel.responses import AdminHTTPError, admin_http_error_handler
+from app.admin_panel.routers import approvals as admin_approvals_router
+from app.admin_panel.routers import audit_log as admin_audit_router
+from app.admin_panel.routers import auth as admin_auth_router
+from app.admin_panel.routers import dashboard as admin_dashboard_router
+from app.admin_panel.routers import users as admin_users_router
+from app.admin_panel.security import get_session_secret
 from app.config import settings
 from app.database import Base, SessionLocal, check_database_connection, engine
 from app.face_recognition_service import ensure_pgvector_schema
@@ -20,7 +29,6 @@ from app.face_recognition_service import FaceRecognitionUnavailable, get_face_re
 from app.routers.face import router as face_router
 from app.routers.kiosk import router as kiosk_router
 from app.routers.kiosk_flow import router as kiosk_flow_router
-from app.schemas import AdminLoginRequest
 from app.seed import seed_sample_data
 from app.voice_agent.realtime_auth import router as realtime_auth_router
 
@@ -71,6 +79,7 @@ async def spacebring_sync_loop() -> None:
     def run_once() -> None:
         with SessionLocal() as db:
             result = sync_bookings(db, get_spacebring_client())
+        sync_status.record_ok(result)
         if result.created or result.updated or result.deleted:
             logger.info("Spacebring sync: %s", result)
 
@@ -78,12 +87,14 @@ async def spacebring_sync_loop() -> None:
         try:
             await asyncio.to_thread(run_once)
         except Exception as exc:  # never let the loop die; the next run retries
+            sync_status.record_error(str(exc))
             logger.warning("Spacebring sync failed: %s", exc)
         await asyncio.sleep(settings.spacebring_sync_interval_seconds)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    get_session_secret()  # fails at startup in production if ADMIN_SESSION_SECRET is missing
     if settings.auto_create_tables:
         Base.metadata.create_all(bind=engine)
         try:
@@ -108,28 +119,16 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Browsers may send cookies only from these exact origins (no "null", no wildcard).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3001",
-        "http://127.0.0.1:3001",
-        "http://localhost:3002",
-        "http://127.0.0.1:3002",
-        "http://localhost:3003",
-        "http://127.0.0.1:3003",
-        "http://localhost:8000",
-        "http://127.0.0.1:8000",
-        "null",
-        "http://localhost:5500",  # common "Live Server" VS Code extension port
-        "http://127.0.0.1:5500",
-        "http://localhost:5173",  # Vite's default dev server port (realtime agent tester)
-        "http://127.0.0.1:5173"
-
-    ],
+    allow_origins=[o.strip() for o in settings.cors_allowed_origins.split(",") if o.strip()],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(AdminAuditMiddleware)
+app.add_exception_handler(AdminHTTPError, admin_http_error_handler)
 
 
 @app.exception_handler(RequestValidationError)
@@ -246,27 +245,21 @@ def database_health_check() -> dict:
 
 
 
-@app.post("/admin/auth/login")
-
-def admin_auth_login(payload: AdminLoginRequest):
-
-    return admin_login(payload)
-
-
-
-
-
 app.include_router(kiosk_router)
 
 app.include_router(kiosk_flow_router)
 app.include_router(face_router)
 app.include_router(admin_router)
+app.include_router(admin_auth_router.router)
+app.include_router(admin_dashboard_router.router)
+app.include_router(admin_approvals_router.router)
+app.include_router(admin_users_router.router)
+app.include_router(admin_audit_router.router)
 
 # Local browser smoke tester: camera, face detect, voice room Q&A, bookings.
 if FE_TEST_DIR.is_dir():
     app.mount("/fe-test", StaticFiles(directory=str(FE_TEST_DIR), html=True), name="fe-test")
 
-app.include_router(admin_router)
 app.include_router(realtime_auth_router, prefix="/voice-agent")
 
 

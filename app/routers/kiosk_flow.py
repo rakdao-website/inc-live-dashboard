@@ -1,6 +1,6 @@
 from datetime import date, datetime, time
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Query, status
 from fastapi.encoders import jsonable_encoder
@@ -10,10 +10,13 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app import face_unknown_capture
+from app.admin_panel.models import VisitorApproval
+from app.admin_panel.pending import create_pending_visitor
 from app.config import settings
 from app.database import get_db
 from app.face_recognition_service import FaceRecognitionResult, FaceRecognitionUnavailable, get_face_recognition_service
 from app.kiosk_flow_schemas import (
+    KioskCaptureLinkRequest,
     CreateFaceProfileRequest,
     FaceCheckSuggestion,
     CreateProfileRequest,
@@ -50,6 +53,7 @@ from app.kiosk_flow_services import (
     service_to_booking_defaults,
 )
 from app.models import (
+    UnknownFaceCapture,
     ActivityFeed,
     Booking,
     Event,
@@ -72,7 +76,8 @@ from app.spacebring_booking_service import (
 )
 from app.spacebring_client import SpacebringError, get_spacebring_client
 from app.spacebring_sync import delete_mirror_booking
-from app.spacebring_zones import TIKTOK_ZONE_IDS
+from app.spacebring_room_images import get_room_cover_urls
+from app.spacebring_zones import PODCAST_ZONE_IDS, TIKTOK_ZONE_IDS
 
 
 router = APIRouter(prefix="/api/kiosk", tags=["Kiosk Flow"])
@@ -140,11 +145,20 @@ def is_overlap_error(exc: SQLAlchemyError) -> bool:
     return "overlaps" in error_text or "overlap" in error_text
 
 
-def find_visitor_by_phone(db: Session, mobile_number: str) -> Visitor | None:
+def is_confirmed(visitor: Visitor) -> bool:
+    """Only approved visitors count; Pending and rejected entries are not confirmed."""
+    return getattr(visitor, "approval_status", "approved") == "approved"
+
+
+def find_visitor_by_phone(
+    db: Session, mobile_number: str, include_unapproved: bool = False
+) -> Visitor | None:
     wanted_phone = normalize_phone(mobile_number)
     for visitor in db.query(Visitor).all():
         if normalize_phone(visitor.visitor_phone) == wanted_phone:
-            return visitor
+            if include_unapproved or is_confirmed(visitor):
+                return visitor
+            return None
     return None
 
 
@@ -164,7 +178,7 @@ def find_visitor_by_profile(db: Session, payload: ProfileLookupRequest) -> Visit
 def find_visitor_by_license(db: Session, license_number: str) -> Visitor | None:
     wanted_license = str(license_number or "").strip().lower()
     for visitor in db.query(Visitor).all():
-        if str(visitor.license_number or "").strip().lower() == wanted_license:
+        if str(visitor.license_number or "").strip().lower() == wanted_license and is_confirmed(visitor):
             return visitor
     return None
 
@@ -176,6 +190,8 @@ def find_visitor_by_face_name(db: Session, name: str | None) -> Visitor | None:
         return None
 
     for visitor in db.query(Visitor).all():
+        if not is_confirmed(visitor):
+            continue
         if str(getattr(visitor, "face_reference_id", "") or "").strip() == wanted_face_identifier:
             return visitor
         if normalize_name(visitor.visitor_name) == wanted_name:
@@ -434,37 +450,94 @@ def license_lookup(
     )
 
 
+def phone_conflict_response(existing: Visitor) -> JSONResponse:
+    if is_confirmed(existing):
+        return conflict_response(
+            message="A visitor with this mobile number already exists",
+            error_code="VISITOR_PHONE_EXISTS",
+        )
+    return conflict_response(
+        message="This mobile number is already waiting for approval. Please ask reception.",
+        error_code="VISITOR_PENDING_APPROVAL",
+    )
+
+
 @router.post("/profiles", status_code=status.HTTP_201_CREATED)
 def create_profile(
     payload: CreateProfileRequest,
     db: Session = Depends(get_db),
 ):
-    existing = find_visitor_by_phone(db, payload.mobile_number)
+    existing = find_visitor_by_phone(db, payload.mobile_number, include_unapproved=True)
 
     if existing is not None:
-        return conflict_response(
-            message="A visitor with this mobile number already exists",
-            error_code="VISITOR_PHONE_EXISTS",
-        )
+        return phone_conflict_response(existing)
 
-    visitor = Visitor(
-        visitor_name=payload.full_name,
-        visitor_phone=normalize_phone(payload.mobile_number),
-        visitor_email=payload.email,
+    # New entries stay Pending until a reviewer approves them in the admin panel.
+    visitor, _approval = create_pending_visitor(
+        db,
+        full_name=payload.full_name,
+        phone=normalize_phone(payload.mobile_number),
+        email=payload.email,
         visitor_type=payload.visitor_type,
-        license_number=None,
         company_name=payload.company_name,
         company_number=payload.company_number,
-        is_existing_client=payload.visitor_type == "client",
-        lead_source="screen_2_check_in",
     )
-    db.add(visitor)
     db.commit()
     db.refresh(visitor)
 
     return success_response(
         message="Visitor profile created",
         data=visitor_payload(visitor),
+    )
+
+
+@router.post("/captures/{capture_id}/link", status_code=status.HTTP_201_CREATED)
+def link_capture_as_pending_visitor(
+    capture_id: int,
+    payload: KioskCaptureLinkRequest,
+    db: Session = Depends(get_db),
+):
+    """Kiosk registration after a face scan.
+
+    Creates a Pending visitor only. It never links to an existing person, never
+    stores the face, and never returns web-match links; staff decide that in
+    the admin panel.
+    """
+    capture = db.get(UnknownFaceCapture, capture_id)
+    if capture is None:
+        return not_found_response(message="Capture not found", error_code="CAPTURE_NOT_FOUND")
+    if capture.status == "linked":
+        existing_approval = (
+            db.query(VisitorApproval).filter(VisitorApproval.capture_id == capture_id).first()
+        )
+        if existing_approval is not None and existing_approval.status == "pending":
+            return success_response(
+                message="Registration is waiting for approval",
+                data={"capture_id": capture_id, "visitor_id": existing_approval.visitor_id, "pending": True},
+            )
+        return conflict_response(message="This scan was already used.", error_code="CAPTURE_ALREADY_LINKED")
+
+    existing = find_visitor_by_phone(db, payload.mobile_number, include_unapproved=True)
+    if existing is not None:
+        return phone_conflict_response(existing)
+
+    visitor, _approval = create_pending_visitor(
+        db,
+        full_name=payload.full_name,
+        phone=normalize_phone(payload.mobile_number),
+        email=payload.email,
+        visitor_type=payload.visitor_type,
+        lead_source="face_kiosk_registration",
+        capture=capture,
+        chosen_rank=payload.chosen_rank,
+    )
+    capture.status = "linked"
+    capture.linked_visitor_id = visitor.visitor_id
+    db.commit()
+
+    return success_response(
+        message="Registration is waiting for approval",
+        data={"capture_id": capture_id, "visitor_id": visitor.visitor_id, "pending": True},
     )
 
 
@@ -902,6 +975,47 @@ def create_kiosk_booking(
         message="Booking created",
         data=data.model_dump(mode="json"),
     )
+
+
+def zone_service_type(zone: Zone) -> str | None:
+    if zone.zone_type == "meeting_room":
+        return "meeting_room"
+    if zone.zone_id in TIKTOK_ZONE_IDS:
+        return "tiktok_studio"
+    if zone.zone_id in PODCAST_ZONE_IDS:
+        return "podcast_studio"
+    return None
+
+
+@router.get("/rooms")
+def list_bookable_rooms(
+    service_type: Literal["meeting_room", "podcast_studio", "tiktok_studio"] | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """Rooms the kiosk can offer, read from the zones table (not hard-coded).
+
+    image_url is the room's cover photo from Spacebring when it has one; the
+    kiosk falls back to its own bundled photo when it is null.
+    """
+    zones = db.query(Zone).filter(Zone.is_bookable.is_(True)).order_by(Zone.zone_id).all()
+    covers = get_room_cover_urls()
+    rooms = []
+    for zone in zones:
+        service = zone_service_type(zone)
+        if service is None or (service_type and service != service_type):
+            continue
+        resource_id = getattr(zone, "spacebring_resource_id", None)
+        rooms.append(
+            {
+                "zone_id": zone.zone_id,
+                "room_name": zone.zone_name,
+                "service_type": service,
+                "is_closed": bool(zone.is_closed),
+                "source": "spacebring" if resource_id else "internal",
+                "image_url": covers.get(resource_id) if resource_id else None,
+            }
+        )
+    return success_response(message="Rooms retrieved", data=rooms)
 
 
 @router.get("/availability")

@@ -1,9 +1,13 @@
 import json
-from datetime import date, time
+from datetime import date, time, timedelta
 
 from app.kiosk_schemas import ScreenBookingCreate
 from app.models import Booking, Event, VisitSession, Visitor, VisitorActivity
 from app.routers.kiosk import create_screen_booking
+
+
+# A date that is always in the future, so a booking is "upcoming" whenever the tests run.
+BOOKING_DATE = date.today() + timedelta(days=30)
 
 
 class FakeQuery:
@@ -80,7 +84,7 @@ class FakeZone:
 class FakeBooking:
     booking_id = 7
     zone_id = "MR_1"
-    booking_date = date(2026, 7, 16)
+    booking_date = BOOKING_DATE
     booking_time_start = time(10, 0)
     booking_time_end = time(11, 0)
 
@@ -88,7 +92,7 @@ class FakeBooking:
 class FakeEvent:
     event_id = 4
     zone_id = "MR_1"
-    event_date = date(2026, 7, 16)
+    event_date = BOOKING_DATE
     event_time_start = time(11, 15)
     event_time_end = time(12, 0)
 
@@ -106,7 +110,7 @@ def screen_booking_payload(**overrides):
         "visitor_phone": "0501234567",
         "visitor_email": "noor@example.com",
         "visitor_is_client": True,
-        "booking_date": date(2026, 7, 16),
+        "booking_date": BOOKING_DATE,
         "booking_time_start": time(11, 0),
         "booking_time_end": time(11, 30),
     }

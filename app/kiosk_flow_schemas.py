@@ -115,6 +115,15 @@ class OtherAssistanceCreate(BaseModel):
     notes: Optional[str] = None
 
 
+class KioskCaptureLinkRequest(BaseModel):
+    full_name: str = Field(..., min_length=1, max_length=150)
+    mobile_number: str = Field(..., min_length=1, max_length=40)
+    email: Optional[str] = Field(default=None, max_length=150)
+    visitor_type: VisitorType = "visitor"
+    chosen_rank: Optional[int] = Field(default=None, ge=1, le=10)
+    enroll_face: bool = True  # accepted for the old kiosk call; the face is stored only on approval
+
+
 class KioskVisitorRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

@@ -139,3 +139,62 @@ def test_availability_endpoint_uses_spacebring(monkeypatch):
     assert response["data"]["available"] is False
     assert response["data"]["room_name"] == "TikTok Beauty Room"
     assert client.created == []  # checking never books
+
+
+def test_rooms_endpoint_lists_zones_by_service_with_spacebring_photos(monkeypatch):
+    class Z:
+        def __init__(self, zone_id, name, zone_type, resource=None, closed=False, bookable=True):
+            self.zone_id, self.zone_name, self.zone_type = zone_id, name, zone_type
+            self.spacebring_resource_id, self.is_closed, self.is_bookable = resource, closed, bookable
+
+    zones = [
+        Z("MR_1", "Meeting Room 1", "meeting_room"),
+        Z("TTS_2", "TikTok Beauty Room", "studio", "res-2"),
+        Z("TTS_3", "TikTok Music Room", "studio", "res-3", closed=True),
+        Z("POD_1", "Podcast Studio", "studio", "res-p"),
+        Z("EVT_1", "Event Area", "event_space"),
+    ]
+
+    class Q:
+        def filter(self, *_): return self
+        def order_by(self, *_): return self
+        def all(self): return zones
+
+    class Db:
+        def query(self, _model): return Q()
+
+    monkeypatch.setattr(kiosk_flow, "get_room_cover_urls", lambda: {"res-2": "https://cdn.test/beauty.jpg"})
+
+    everything = kiosk_flow.list_bookable_rooms(service_type=None, db=Db())["data"]
+    assert [r["zone_id"] for r in everything] == ["MR_1", "TTS_2", "TTS_3", "POD_1"]  # event area excluded
+    tiktok = kiosk_flow.list_bookable_rooms(service_type="tiktok_studio", db=Db())["data"]
+    assert [r["zone_id"] for r in tiktok] == ["TTS_2", "TTS_3"]
+    beauty, music = tiktok
+    assert beauty["image_url"] == "https://cdn.test/beauty.jpg" and beauty["source"] == "spacebring"
+    assert music["image_url"] is None and music["is_closed"] is True
+    meeting = kiosk_flow.list_bookable_rooms(service_type="meeting_room", db=Db())["data"][0]
+    assert meeting["source"] == "internal" and meeting["image_url"] is None
+
+
+def test_cover_urls_are_cached_and_survive_an_outage(monkeypatch):
+    import app.spacebring_room_images as images
+
+    calls = {"n": 0}
+
+    class Client:
+        def list_rooms(self):
+            calls["n"] += 1
+            if calls["n"] == 3:
+                raise RuntimeError("down")
+            return [{"id": "r1", "media": [{"key": "k", "url": "https://cdn.test/1.jpg"}]}, {"id": "r2", "media": []}]
+
+    monkeypatch.setattr(images, "spacebring_enabled", lambda: True)
+    monkeypatch.setattr(images, "get_spacebring_client", lambda: Client())
+    images._cache, images._loaded_at = {}, 0.0
+
+    assert images.get_room_cover_urls(now=100.0) == {"r1": "https://cdn.test/1.jpg"}
+    images.get_room_cover_urls(now=200.0)             # within 5 minutes: cached
+    assert calls["n"] == 1
+    images.get_room_cover_urls(now=500.0)             # refresh
+    assert calls["n"] == 2
+    assert images.get_room_cover_urls(now=900.0) == {"r1": "https://cdn.test/1.jpg"}  # outage: last good answer kept

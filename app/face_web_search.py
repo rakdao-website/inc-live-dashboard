@@ -156,3 +156,36 @@ def _parse_items(items: list[dict], *, limit: int) -> list[WebFaceMatch]:
 
 def encode_thumbnail(image_bytes: bytes) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(image_bytes).decode("ascii")
+
+def get_account_info() -> dict:
+    """FaceCheck.ID account status via POST /api/info (free; consumes no credits).
+
+    Returns {"enabled", "demo_mode", "credit_cost", "credits_remaining", "online", "error"}.
+    The API token is never included. `credits_remaining` is None when unknown.
+    """
+    info = {
+        "enabled": is_enabled(),
+        "demo_mode": bool(settings.face_web_search_testing_mode),
+        "credit_cost": settings.face_web_search_credit_cost,
+        "credits_remaining": None,
+        "online": None,
+        "error": None,
+    }
+    if not info["enabled"]:
+        info["error"] = "Web face search is disabled or FACECHECK_API_TOKEN is not set."
+        return info
+    try:
+        with httpx.Client(timeout=10) as client:
+            body = client.post(
+                f"{FACECHECK_SITE}/api/info",
+                headers={"accept": "application/json", "Authorization": settings.facecheck_api_token},
+            ).json()
+        if body.get("error"):
+            info["error"] = f"FaceCheck.ID refused the request ({body.get('code')})."
+        else:
+            credits = body.get("remaining_credits")
+            info["credits_remaining"] = int(credits) if isinstance(credits, (int, float)) else None
+            info["online"] = body.get("is_online")
+    except (httpx.HTTPError, ValueError):
+        info["error"] = "Could not reach FaceCheck.ID."
+    return info

@@ -7,6 +7,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.admin_panel.deps import admin_gate
 from app.config import settings
 from app.database import get_db
 from app.kiosk_flow_services import schedule_has_conflict
@@ -29,8 +30,6 @@ from app.models import (
 )
 from app.operating_hours import OPERATING_HOURS_MESSAGE, is_within_operating_hours
 from app.schemas import (
-    AdminLoginRequest,
-    AdminLoginResponse,
     AdminZoneRead,
     BookingCreate,
     BookingRead,
@@ -53,6 +52,7 @@ from app.services import booking_status, now_dubai
 router = APIRouter(
     prefix="/admin",
     tags=["Admin"],
+    dependencies=[Depends(admin_gate)],
 )
 
 
@@ -179,31 +179,6 @@ def upsert_visitor_from_booking(booking: Booking, db: Session) -> None:
 def is_overlap_error(exc: SQLAlchemyError) -> bool:
     error_text = str(exc).lower()
     return "overlaps" in error_text or "overlap" in error_text
-
-
-@router.post("/auth/login")
-def admin_login(payload: AdminLoginRequest):
-    if (
-        payload.username != settings.admin_username
-        or payload.password != settings.admin_password
-    ):
-        return JSONResponse(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            content=error_response(
-                message="Invalid username or password",
-                error_code="INVALID_ADMIN_LOGIN",
-            ),
-        )
-
-    user = AdminLoginResponse(
-        username=settings.admin_username,
-        role=settings.admin_role,
-    )
-
-    return success_response(
-        message="Signed in successfully",
-        data=user.model_dump(),
-    )
 
 
 @router.get("/health")

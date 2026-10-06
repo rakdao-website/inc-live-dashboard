@@ -188,6 +188,13 @@ class Visitor(Base):
     )
     face_consent_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     lead_source: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    # 'pending' = created at the kiosk, waiting for a reviewer. Only 'approved'
+    # counts as a confirmed visitor; existing rows default to 'approved'.
+    approval_status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        server_default=text("'approved'"),
+    )
     last_visit_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime,

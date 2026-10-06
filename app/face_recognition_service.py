@@ -99,6 +99,13 @@ class PgVectorStore:
                 )
             db.commit()
 
+    def delete(self, name: str) -> int:
+        """Remove every vector stored under this identifier; returns how many."""
+        with self._session_factory() as db:
+            result = db.execute(text("DELETE FROM face_vectors WHERE face_identifier = :n"), {"n": name})
+            db.commit()
+            return result.rowcount or 0
+
 
 def ensure_pgvector_schema(engine) -> None:
     """Create the vector extension and face_vectors table if missing (idempotent).
@@ -165,6 +172,9 @@ class FaceDatabase:
             photo_base64 = None
         self.store.replace(name, [self.normalize(e) for e in embeddings], photo_base64)
 
+    def delete_person(self, name: str) -> int:
+        return self.store.delete(name)
+
 
 class FaceRecognitionService:
     def __init__(self, database: FaceDatabase | None = None):
@@ -195,6 +205,10 @@ class FaceRecognitionService:
             app.prepare(ctx_id=0, det_size=DETECTION_SIZE)
             self._app = app
             return app
+
+    @property
+    def is_ready(self) -> bool:
+        return self._app is not None
 
     def warm_up(self) -> None:
         self._face_app()

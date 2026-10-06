@@ -32,7 +32,9 @@ def test_parse_booking_intent_uses_service_defaults_when_room_is_not_spoken():
     assert "duration" in result.missing
 
 
-def test_parse_booking_intent_extracts_time_and_service_defaults_from_natural_speech():
+def test_parse_booking_intent_extracts_time_and_asks_which_meeting_room_when_not_spoken():
+    # Two meeting rooms exist, so an unnamed one is never guessed: the visitor
+    # is asked which room they want (see booking_intent_service).
     with patch("app.booking_intent_service.build_room_directory", return_value=[]), patch(
         "app.booking_intent_service.find_room_in_question", return_value=None
     ):
@@ -44,8 +46,8 @@ def test_parse_booking_intent_extracts_time_and_service_defaults_from_natural_sp
             )
         )
 
-    assert result.zone_id == "MR_1"
-    assert result.zone_name == "Meeting Room 1"
+    assert result.zone_id is None
+    assert "room" in result.missing
     assert result.booking_date is not None
     assert result.booking_time_start is not None
     assert result.duration_minutes == 60

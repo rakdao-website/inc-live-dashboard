@@ -119,7 +119,8 @@ Solid lines exist in the code. Dotted lines are planned.
 | `voice_agent/realtime_auth.py` (`/voice-agent/*`) | Mints OpenAI ephemeral token; serves `knowledge_base.md` |
 | `room_question_service.py`, `booking_intent_service.py`, `registration_intent_service.py` | Transcript → structured intent / room answers, scripted by default, Gemini or Grok optional |
 | `voice_agent/tts_service.py`, `transcription_service.py`, `xai_client.py`, `gemini_service.py` | Text pipeline helpers (server TTS / STT / LLM clients) |
-| `admin.py` | Admin auth and back-office CRUD (about 1,450 lines) |
+| `admin.py` | Back-office CRUD (about 1,400 lines); login moved to `admin_panel/` |
+| `admin_panel/` | Admin panel backend: signed-cookie sessions, roles (`permissions.py`), the gate every `/admin/*` and `/api/face/*` route passes (`deps.admin_gate`), audit log (`audit.py`), approval queue, dashboard, admin users |
 
 ### 3.3 External services
 
@@ -453,7 +454,7 @@ flowchart TD
 
 ---
 
-### Flow 6 — Admin review of unknown captures *(built, API only)*
+### Flow 6 — Admin review of unknown captures *(built; UI in `inc-kiosk-frontend-admin`)*
 
 For faces that were not resolved at the kiosk.
 
@@ -466,7 +467,11 @@ flowchart LR
     L --> E[Face enrolled to pgvector<br/>capture.status = linked]
 ```
 
-`GET /api/face/recognition-events` exposes the recognition log for audit. There is no admin UI for this yet.
+`GET /api/face/recognition-events` exposes the recognition log for audit.
+
+**Admin access.** Every `/admin/*` and `/api/face/*` route requires a signed-in admin user (HTTP-only cookie, server-side session, scrypt password hashes, login rate limit) and a role that allows the action; anonymous calls return 401 and a wrong role 403. Roles: `super_user`, `reception`, `reviewer`, `read_only`. Only `reviewer` and `super_user` see FaceCheck.ID source links and thumbnails. Every admin write lands in `admin_audit_log`. Users are created with `scripts/create_admin_user.py`.
+
+**Pending visitors.** A new person registered at the kiosk (`POST /api/kiosk/profiles` or `POST /api/kiosk/captures/{id}/link`) is created with `approval_status = 'pending'` and a `visitor_approvals` row. Pending visitors can finish today's visit but are not found by phone, licence or face lookups, and no face is stored. A reviewer approves (face saved, with consent recorded) or rejects (face data and scan image removed) in the admin panel.
 
 ---
 
@@ -532,7 +537,11 @@ All responses use the envelope `{ success, message, data }` or `{ success:false,
 |---|---|---|
 | `DATABASE_URL` | local Postgres | System of record |
 | `AUTO_CREATE_TABLES` / `SEED_SAMPLE_DATA` | `false` in code (`.env.example` sets `true`) | Dev convenience, turn off in production |
-| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / `admin123` | Admin login |
+| `ADMIN_SESSION_SECRET` | empty | Signs admin session cookies (32+ chars). Required when `ENVIRONMENT=production`; the API refuses to start without it |
+| `ADMIN_SESSION_TTL_MINUTES`, `ADMIN_COOKIE_SECURE`, `ADMIN_LOGIN_MAX_ATTEMPTS`, `ADMIN_LOGIN_WINDOW_SECONDS` | `480`, `false`, `5`, `900` | Session length, HTTPS-only cookie, login rate limit |
+| `CORS_ALLOWED_ORIGINS` | local dev origins | Comma-separated origins allowed with cookies (no `null`) |
+| `SPACEBRING_ENVIRONMENT` | `sandbox` | Label shown in the admin panel (`sandbox` or `live`) |
+| `FACE_WEB_SEARCH_CREDIT_COST` | `3` | Credits one FaceCheck.ID search uses, shown before a re-run |
 | `FACE_WEB_SEARCH_ENABLED` | `false` | Master switch for FaceCheck.ID |
 | `FACECHECK_API_TOKEN` | empty | Required if enabled |
 | `FACE_WEB_SEARCH_TESTING_MODE` | `false` in code (`.env.example` sets `true`) | Free, inaccurate demo results |

@@ -19,7 +19,9 @@ def test_kiosk_frontend_origin_can_call_backend():
     assert response.headers["access-control-allow-origin"] == "http://localhost:3002"
 
 
-def test_local_dev_origin_on_any_port_can_preflight_backend():
+def test_origin_not_in_the_allow_list_is_rejected():
+    # Admin sessions use cookies, so only the exact origins in
+    # CORS_ALLOWED_ORIGINS may call the backend. Add a port there to allow it.
     client = TestClient(app)
 
     response = client.options(
@@ -31,5 +33,5 @@ def test_local_dev_origin_on_any_port_can_preflight_backend():
         },
     )
 
-    assert response.status_code == 200
-    assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+    assert response.status_code == 400
+    assert "access-control-allow-origin" not in response.headers

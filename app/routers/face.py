@@ -16,11 +16,16 @@ import binascii
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, status
+from app.admin_panel.clock import utcnow
+
+from fastapi import APIRouter, Depends, Request, status
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.orm import Session
 
 from app import face_gallery, face_web_search
+from app.admin_panel.audit import record_audit
+from app.admin_panel.capture_view import capture_view
+from app.admin_panel.deps import AdminPrincipal, admin_gate, current_admin
 from app.database import get_db
 from app.face_recognition_service import (
     FaceMatch,
@@ -29,15 +34,17 @@ from app.face_recognition_service import (
 )
 from app.face_schemas import (
     CaptureRead,
+    RerunSearchRequest,
     DetectFaceRequest,
     DetectFaceResponse,
     LinkCaptureRequest,
 )
+from app.admin_panel.capture_files import resolve_capture_image
 from app.face_web_search import WebFaceSearchUnavailable
 from app.kiosk_flow_services import normalize_name, normalize_phone
 from app.models import FaceWebMatch, RecognitionEvent, UnknownFaceCapture, Visitor
 
-router = APIRouter(prefix="/api/face", tags=["Face"])
+router = APIRouter(prefix="/api/face", tags=["Face"], dependencies=[Depends(admin_gate)])
 
 UNKNOWN_FACE_DIR = Path(__file__).resolve().parents[2] / "data" / "unknown_faces"
 
@@ -52,6 +59,10 @@ def _error(message: str, error_code: str) -> dict:
 
 def _not_found(message: str, error_code: str) -> JSONResponse:
     return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content=_error(message, error_code))
+
+
+def _conflict(message: str, error_code: str) -> JSONResponse:
+    return JSONResponse(status_code=status.HTTP_409_CONFLICT, content=_error(message, error_code))
 
 
 def _bad_request(message: str, error_code: str) -> JSONResponse:
@@ -97,10 +108,10 @@ def _run_web_search(db: Session, capture: UnknownFaceCapture, image_bytes: bytes
     try:
         matches = face_web_search.search_web_faces(image_bytes, limit=3)
     except WebFaceSearchUnavailable as exc:
-        capture.web_search_status = f"unavailable: {exc}"
+        capture.web_search_status = f"unavailable: {exc}"[:40]
         return
     except Exception as exc:  # noqa: BLE001 - external call, never fatal to kiosk
-        capture.web_search_status = f"error: {exc}"
+        capture.web_search_status = f"error: {exc}"[:40]
         return
 
     for match in matches:
@@ -118,13 +129,18 @@ def _run_web_search(db: Session, capture: UnknownFaceCapture, image_bytes: bytes
     capture.status = "web_searched"
 
 
-def _capture_payload(db: Session, capture: UnknownFaceCapture) -> dict:
+def _capture_payload(db: Session, capture: UnknownFaceCapture, role: str) -> dict:
     db.refresh(capture)
-    return CaptureRead.model_validate(capture).model_dump(mode="json")
+    return capture_view(capture, role)
 
 
 @router.post("/detect")
-def detect_face(payload: DetectFaceRequest, db: Session = Depends(get_db)):
+def detect_face(
+    payload: DetectFaceRequest,
+    request: Request,
+    principal: AdminPrincipal = Depends(current_admin),
+    db: Session = Depends(get_db),
+):
     images = payload.images_base64 or ([payload.image_base64] if payload.image_base64 else [])
     if not images:
         return _bad_request(
@@ -181,20 +197,25 @@ def detect_face(payload: DetectFaceRequest, db: Session = Depends(get_db)):
     if payload.run_web_search:
         _run_web_search(db, capture, best_bytes)
 
+    record_audit(db, principal, "capture.detect", "capture", capture.capture_id, {"web_search": payload.run_web_search}, request=request)
     db.commit()
 
-    return _success(
-        "Face not recognized; captured for review",
-        DetectFaceResponse(
-            recognized=False,
-            confidence=best_score if best_score is not None and best_score >= 0 else None,
-            capture=CaptureRead.model_validate(capture),
-        ).model_dump(mode="json"),
-    )
+    response = DetectFaceResponse(
+        recognized=False,
+        confidence=best_score if best_score is not None and best_score >= 0 else None,
+    ).model_dump(mode="json")
+    response["capture"] = capture_view(capture, principal.role)
+    return _success("Face not recognized; captured for review", response)
 
 
 @router.get("/captures")
-def list_captures(status_filter: str | None = None, limit: int = 50, db: Session = Depends(get_db)):
+def list_captures(
+    status_filter: str | None = None,
+    limit: int = 50,
+    principal: AdminPrincipal = Depends(current_admin),
+    db: Session = Depends(get_db),
+):
+    limit = max(1, min(limit, 200))
     query = db.query(UnknownFaceCapture)
     if status_filter:
         query = query.filter(UnknownFaceCapture.status == status_filter)
@@ -203,16 +224,16 @@ def list_captures(status_filter: str | None = None, limit: int = 50, db: Session
     )
     return _success(
         "Captures retrieved",
-        [CaptureRead.model_validate(capture).model_dump(mode="json") for capture in captures],
+        [capture_view(capture, principal.role) for capture in captures],
     )
 
 
 @router.get("/captures/{capture_id}")
-def get_capture(capture_id: int, db: Session = Depends(get_db)):
+def get_capture(capture_id: int, principal: AdminPrincipal = Depends(current_admin), db: Session = Depends(get_db)):
     capture = db.get(UnknownFaceCapture, capture_id)
     if capture is None:
         return _not_found("Capture not found", "CAPTURE_NOT_FOUND")
-    return _success("Capture retrieved", CaptureRead.model_validate(capture).model_dump(mode="json"))
+    return _success("Capture retrieved", capture_view(capture, principal.role))
 
 
 @router.get("/captures/{capture_id}/image")
@@ -223,30 +244,101 @@ def get_capture_image(capture_id: int, db: Session = Depends(get_db)):
     path = Path(capture.image_path)
     if not path.exists():
         return _not_found("Capture image file missing", "CAPTURE_IMAGE_MISSING")
-    return FileResponse(str(path), media_type="image/jpeg")
+    return FileResponse(str(path), media_type="image/jpeg", headers={"Cache-Control": "private, no-store"})
+
+
+@router.get("/visitor-search")
+def search_visitors_for_linking(q: str, limit: int = 8, db: Session = Depends(get_db)):
+    """Find approved people to link a capture to. Minimal fields; the phone is masked."""
+    term = q.strip()
+    if len(term) < 2:
+        return _bad_request("Type at least 2 characters.", "QUERY_TOO_SHORT")
+    like = f"%{term}%"
+    rows = (
+        db.query(Visitor)
+        .filter(Visitor.approval_status == "approved")
+        .filter(Visitor.visitor_name.ilike(like) | Visitor.visitor_phone.ilike(like) | Visitor.company_name.ilike(like))
+        .order_by(Visitor.visitor_name)
+        .limit(max(1, min(limit, 20)))
+        .all()
+    )
+    return _success(
+        "Visitors found",
+        [
+            {
+                "visitor_id": v.visitor_id,
+                "visitor_name": v.visitor_name,
+                "visitor_type": v.visitor_type,
+                "company_name": v.company_name,
+                "phone_hint": f"…{v.visitor_phone[-4:]}" if v.visitor_phone else None,
+                "face_consent_given": v.face_consent_given,
+                "has_face": bool(v.face_reference_id),
+            }
+            for v in rows
+        ],
+    )
+
+
+@router.get("/web-search/quota")
+def web_search_quota():
+    """Credit cost and remaining balance, shown to staff before a search is run."""
+    return _success("Web search quota", face_web_search.get_account_info())
 
 
 @router.post("/captures/{capture_id}/web-search")
-def rerun_web_search(capture_id: int, db: Session = Depends(get_db)):
+def rerun_web_search(
+    capture_id: int,
+    payload: RerunSearchRequest,
+    request: Request,
+    principal: AdminPrincipal = Depends(current_admin),
+    db: Session = Depends(get_db),
+):
     capture = db.get(UnknownFaceCapture, capture_id)
     if capture is None:
         return _not_found("Capture not found", "CAPTURE_NOT_FOUND")
 
-    path = Path(capture.image_path)
-    if not path.exists():
+    path = resolve_capture_image(capture.image_path)
+    if path is None:
         return _not_found("Capture image file missing", "CAPTURE_IMAGE_MISSING")
 
+    quota = face_web_search.get_account_info()
+    if not payload.confirm_credit_cost:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={**_error("Confirm the credit cost before searching.", "CREDIT_COST_NOT_CONFIRMED"), "details": quota},
+        )
+    remaining = quota.get("credits_remaining")
+    if not quota["demo_mode"] and remaining is not None and remaining < quota["credit_cost"]:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={**_error("Not enough FaceCheck.ID credits left.", "INSUFFICIENT_CREDITS"), "details": quota},
+        )
+
     _run_web_search(db, capture, path.read_bytes())
+    record_audit(
+        db, principal, "capture.web_search", "capture", capture_id,
+        {"credit_cost": quota["credit_cost"], "demo_mode": quota["demo_mode"], "result": capture.web_search_status},
+        request=request,
+    )
     db.commit()
-    return _success("Web search completed", _capture_payload(db, capture))
+    return _success("Web search completed", _capture_payload(db, capture, principal.role))
 
 
 @router.post("/captures/{capture_id}/link", status_code=status.HTTP_201_CREATED)
-def link_capture(capture_id: int, payload: LinkCaptureRequest, db: Session = Depends(get_db)):
+def link_capture(
+    capture_id: int,
+    payload: LinkCaptureRequest,
+    request: Request,
+    principal: AdminPrincipal = Depends(current_admin),
+    db: Session = Depends(get_db),
+):
     capture = db.get(UnknownFaceCapture, capture_id)
     if capture is None:
         return _not_found("Capture not found", "CAPTURE_NOT_FOUND")
+    if capture.status == "linked":
+        return _conflict("This capture is already linked.", "CAPTURE_ALREADY_LINKED")
 
+    created = False
     if payload.visitor_id is not None:
         visitor = db.get(Visitor, payload.visitor_id)
         if visitor is None:
@@ -273,15 +365,40 @@ def link_capture(capture_id: int, payload: LinkCaptureRequest, db: Session = Dep
             )
             db.add(visitor)
             db.flush()
+            created = True
+
+    if visitor.approval_status != "approved":
+        db.rollback()
+        return _conflict("This visitor is not approved yet; decide it in the approval queue.", "VISITOR_NOT_APPROVED")
+
+    enrol = bool(payload.enroll_face and capture.embedding)
+    if enrol and not visitor.face_consent_given:
+        if not payload.consent_confirmed:
+            db.rollback()
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content=_error(
+                    "Face consent is not recorded for this person. Confirm consent, or link without the face.",
+                    "CONSENT_REQUIRED",
+                ),
+            )
+        visitor.face_consent_given = True
+        visitor.face_consent_at = utcnow()
 
     identifier = f"visitor:{visitor.visitor_id}"
-    if payload.enroll_face and capture.embedding:
+    if enrol:
         embedding_vector = face_gallery.deserialize_embedding(capture.embedding)
         get_face_recognition_service().database.replace_person(identifier, [embedding_vector])
         visitor.face_reference_id = identifier
 
     capture.status = "linked"
     capture.linked_visitor_id = visitor.visitor_id
+    record_audit(
+        db, principal, "capture.link", "capture", capture_id,
+        {"visitor_id": visitor.visitor_id, "created_visitor": created, "face_enrolled": enrol,
+         "consent_attested": bool(payload.consent_confirmed)},
+        request=request,
+    )
     db.commit()
 
     return _success(
@@ -289,18 +406,24 @@ def link_capture(capture_id: int, payload: LinkCaptureRequest, db: Session = Dep
         {
             "capture_id": capture.capture_id,
             "visitor_id": visitor.visitor_id,
-            "face_identifier": identifier if payload.enroll_face else None,
-            "enrolled": bool(payload.enroll_face and capture.embedding),
+            "face_identifier": identifier if enrol else None,
+            "enrolled": enrol,
         },
     )
 
 
 @router.post("/captures/{capture_id}/dismiss")
-def dismiss_capture(capture_id: int, db: Session = Depends(get_db)):
+def dismiss_capture(
+    capture_id: int,
+    request: Request,
+    principal: AdminPrincipal = Depends(current_admin),
+    db: Session = Depends(get_db),
+):
     capture = db.get(UnknownFaceCapture, capture_id)
     if capture is None:
         return _not_found("Capture not found", "CAPTURE_NOT_FOUND")
     capture.status = "dismissed"
+    record_audit(db, principal, "capture.dismiss", "capture", capture_id, request=request)
     db.commit()
     return _success("Capture dismissed", {"capture_id": capture_id, "status": "dismissed"})
 
