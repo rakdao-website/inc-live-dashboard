@@ -4,7 +4,9 @@ from typing import Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-VisitorType = Literal["client", "visitor"]
+VisitorType = Literal["client", "visitor"]  # what a kiosk registration may create
+# What a stored visitor can be: staff ("employee") are seeded, never self-registered.
+StoredVisitorType = Literal["client", "employee", "visitor"]
 RecognitionMethod = Literal["face", "lookup", "manual"]
 KioskService = Literal[
     "meeting_room",
@@ -131,7 +133,7 @@ class KioskVisitorRead(BaseModel):
     visitor_name: str
     visitor_phone: str
     visitor_email: Optional[str] = None
-    visitor_type: VisitorType = "visitor"
+    visitor_type: StoredVisitorType = "visitor"
     company_name: Optional[str] = None
     company_number: Optional[str] = None
     license_number: Optional[str] = None

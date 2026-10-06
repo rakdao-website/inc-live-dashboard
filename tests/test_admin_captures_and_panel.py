@@ -6,6 +6,7 @@ from app.admin_panel import capture_files
 from app.admin_panel.models import AdminAuditLog, AdminUser
 from app.models import UnknownFaceCapture, Visitor, Zone
 from app.routers import face as face_module
+from tests.conftest import NEW_PASSWORD
 from tests.test_admin_approvals import FakeService
 
 
@@ -166,11 +167,11 @@ def test_super_user_manages_users_and_last_super_user_is_protected(login, db):
     admin = login("super_user")
     created = admin.post(
         "/admin/users",
-        json={"username": "New.Reviewer", "display_name": "New", "role": "reviewer", "password": "Brand-New-Pass1"},
+        json={"username": "New.Reviewer", "display_name": "New", "role": "reviewer", "password": NEW_PASSWORD},
     )
     assert created.status_code == 201 and created.json()["data"]["username"] == "new.reviewer"
     assert "password" not in created.text
-    assert admin.post("/admin/users", json={"username": "new.reviewer", "display_name": "x", "role": "reviewer", "password": "Brand-New-Pass1"}).status_code == 409
+    assert admin.post("/admin/users", json={"username": "new.reviewer", "display_name": "x", "role": "reviewer", "password": NEW_PASSWORD}).status_code == 409
     assert admin.post("/admin/users", json={"username": "weak", "display_name": "x", "role": "reviewer", "password": "short"}).status_code == 422
 
     me = db.query(AdminUser).filter(AdminUser.role == "super_user").one()

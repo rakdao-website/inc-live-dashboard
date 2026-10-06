@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from app.admin_panel.models import AdminAuditLog, AdminSession, AdminUser
 from app.config import settings
 from app.main import app
-from tests.conftest import PASSWORD, make_user
+from tests.conftest import NEW_PASSWORD, OTHER_PASSWORD, PASSWORD, make_user
 
 
 def post_login(client, username, password):
@@ -26,7 +26,7 @@ def test_login_sets_http_only_signed_cookie_and_returns_permissions(client, db):
 
 
 def test_default_admin_credentials_no_longer_work(client):
-    assert post_login(client, "admin", "admin123").status_code == 401
+    assert post_login(client, "admin", OTHER_PASSWORD).status_code == 401
 
 
 def test_wrong_password_and_unknown_user_look_the_same(client, db):
@@ -105,7 +105,7 @@ def test_change_password_revokes_other_sessions(login, client, db):
     assert post_login(second, "reception-user", PASSWORD).status_code == 200
     response = first.post(
         "/admin/auth/change-password",
-        json={"current_password": PASSWORD, "new_password": "Another-Pass-77"},
+        json={"current_password": PASSWORD, "new_password": NEW_PASSWORD},
     )
     assert response.status_code == 200
     assert second.get("/admin/auth/me").status_code == 401

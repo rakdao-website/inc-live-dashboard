@@ -2,21 +2,22 @@ import time
 
 from app.admin_panel import security
 from app.config import settings
+from tests.conftest import PASSWORD
 
 
 def test_password_hash_verifies_and_is_salted():
-    first = security.hash_password("Correct-Horse-9")
-    second = security.hash_password("Correct-Horse-9")
+    first = security.hash_password(PASSWORD)
+    second = security.hash_password(PASSWORD)
     assert first != second
-    assert security.verify_password("Correct-Horse-9", first)
+    assert security.verify_password(PASSWORD, first)
     assert not security.verify_password("wrong", first)
-    assert not security.verify_password("Correct-Horse-9", "not-a-hash")
+    assert not security.verify_password(PASSWORD, "not-a-hash")
 
 
 def test_password_policy_rejects_weak_passwords():
     assert security.password_problem("short1A")
     assert security.password_problem("alllowercase123456")
-    assert security.password_problem("Correct-Horse-9") is None
+    assert security.password_problem(PASSWORD) is None
 
 
 def test_token_round_trip_and_tamper(monkeypatch):

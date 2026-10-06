@@ -1,5 +1,8 @@
 """Shared fixtures for the admin panel tests: an in-memory SQLite database and signed-in clients."""
 
+import os
+import secrets
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import BigInteger, create_engine
@@ -22,7 +25,21 @@ from app.config import settings  # noqa: E402
 from app.database import Base, get_db  # noqa: E402
 from app.main import app  # noqa: E402
 
-PASSWORD = "Correct-Horse-9"
+def _random_password(name: str) -> str:
+    """A fresh password per test run (mixed case and a digit, 21 characters): nothing is hard-coded.
+
+    This file can be imported twice (by pytest and by `from tests.conftest import ...`),
+    so the value is kept in the environment to stay the same within one run.
+    """
+    key = f"ADMIN_TEST_{name}"
+    if key not in os.environ:
+        os.environ[key] = "Tp" + secrets.token_hex(8) + "Aa1"
+    return os.environ[key]
+
+
+PASSWORD = _random_password("PASSWORD")
+OTHER_PASSWORD = _random_password("OTHER")   # a password that is wrong for the test users
+NEW_PASSWORD = _random_password("NEW")       # used when a test changes or sets a password
 
 
 @pytest.fixture()
@@ -33,6 +50,17 @@ def session_factory(monkeypatch):
     monkeypatch.setattr(audit_module, "session_factory", factory)
     monkeypatch.setattr(settings, "admin_session_secret", "x" * 40)
     login_limiter.clear()
+
+    import json
+
+    from app import runtime_settings
+
+    def read_overrides():
+        with factory() as db:
+            return {r.setting_key: json.loads(r.setting_value) for r in db.query(runtime_settings.AppSetting).all()}
+
+    monkeypatch.setattr(runtime_settings, "loader", read_overrides)
+    runtime_settings.invalidate()
     return factory
 
 
