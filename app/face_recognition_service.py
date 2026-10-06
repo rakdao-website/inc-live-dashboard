@@ -182,6 +182,16 @@ class FaceDatabase:
         return self.store.delete(name)
 
 
+# A second face at least this fraction of the largest face's area (about 70% of its
+# width) means two people are in front of the camera. A small face in the
+# background is ignored: the person at the kiosk is the largest face.
+CROWD_RATIO = 0.5
+
+
+def _face_area(face: Any) -> float:
+    return float((face.bbox[2] - face.bbox[0]) * (face.bbox[3] - face.bbox[1]))
+
+
 class FaceRecognitionService:
     def __init__(self, database: FaceDatabase | None = None):
         self.database = database or FaceDatabase()
@@ -236,19 +246,21 @@ class FaceRecognitionService:
             raise ValueError("Could not decode face image.")
         return frame
 
-    def _embedding_from_image_safe(self, image_base64: str) -> np.ndarray | None:
+    def _analyse_image_safe(self, image_base64: str) -> tuple[np.ndarray | None, bool]:
+        """(embedding of the largest face, whether a second face is nearly as large)."""
         try:
             frame = self.decode_image_base64(image_base64)
             faces = self._face_app().get(frame)
             if not faces:
-                return None
-            face = max(
-                faces,
-                key=lambda item: (item.bbox[2] - item.bbox[0]) * (item.bbox[3] - item.bbox[1]),
-            )
-            return self.database.normalize(face.embedding)
+                return None, False
+            ranked = sorted(faces, key=_face_area, reverse=True)
+            crowded = len(ranked) > 1 and _face_area(ranked[1]) >= CROWD_RATIO * _face_area(ranked[0])
+            return self.database.normalize(ranked[0].embedding), crowded
         except Exception:
-            return None
+            return None, False
+
+    def _embedding_from_image_safe(self, image_base64: str) -> np.ndarray | None:
+        return self._analyse_image_safe(image_base64)[0]
 
     def embedding_from_image_base64(self, image_base64: str) -> np.ndarray:
         embedding = self._embedding_from_image_safe(image_base64)
@@ -283,12 +295,23 @@ class FaceRecognitionService:
             raise ValueError("At least one face image is required for recognition.")
 
         embeddings: list[np.ndarray] = []
+        crowded_frames = 0
         with ThreadPoolExecutor(max_workers=min(len(images_base64), 4)) as executor:
-            futures = [executor.submit(self._embedding_from_image_safe, img) for img in images_base64]
+            futures = [executor.submit(self._analyse_image_safe, img) for img in images_base64]
             for future in as_completed(futures):
-                embedding = future.result()
+                embedding, crowded = future.result()
                 if embedding is not None:
                     embeddings.append(embedding)
+                    crowded_frames += 1 if crowded else 0
+
+        if embeddings and crowded_frames:
+            # Never guess between two people, and never run a web search on a bystander.
+            return FaceRecognitionResult(
+                status="multiple_faces",
+                best_match=None,
+                suggestions=[],
+                message="More than one person is in front of the camera.",
+            )
 
         if not embeddings:
             return FaceRecognitionResult(

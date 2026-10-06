@@ -198,3 +198,54 @@ def test_pgvector_round_trip_ranks_by_cosine_similarity(live_store):
 
     database.replace_person("pytest:a", [unit(5)])  # replaces, does not append
     assert database.match(unit(0), top_k=1)[0].score < MATCH_THRESHOLD
+
+
+def _service_with_faces(monkeypatch, per_frame_faces):
+    """A service whose camera frames contain the given faces: [(width, embedding), ...] per frame."""
+    class Face:
+        def __init__(self, width, embedding):
+            self.bbox = np.array([0, 0, width, width])
+            self.embedding = embedding
+
+    class App:
+        calls = 0
+        lock = __import__("threading").Lock()
+
+        def get(self, _frame):
+            with self.lock:  # frames are analysed in parallel: hand out each face set exactly once
+                faces = per_frame_faces[min(self.calls, len(per_frame_faces) - 1)]
+                self.calls += 1
+            return [Face(w, e) for w, e in faces]
+
+    class Cv2:
+        IMREAD_COLOR = 1
+
+        @staticmethod
+        def imdecode(_a, _m):
+            return np.zeros((80, 80, 3), dtype=np.uint8)
+
+    monkeypatch.setitem(__import__("sys").modules, "cv2", Cv2)
+    db = _make_database({"visitor:7": [np.array([1.0, 0.0])]})
+    service = FaceRecognitionService(database=db)
+    service._app = App()
+    return service
+
+
+def test_two_similar_sized_faces_are_not_guessed(monkeypatch):
+    service = _service_with_faces(monkeypatch, [[(100, np.array([1.0, 0.0])), (90, np.array([0.0, 1.0]))]])
+    result = service.recognize_images_base64(["AAAA"])
+    assert result.status == "multiple_faces" and result.best_match is None
+
+
+def test_a_small_background_face_is_ignored(monkeypatch):
+    # 28 px vs 100 px is about 8% of the area: someone far behind, not at the kiosk.
+    service = _service_with_faces(monkeypatch, [[(100, np.array([1.0, 0.0])), (28, np.array([0.0, 1.0]))]])
+    result = service.recognize_images_base64(["AAAA"])
+    assert result.status == "recognized" and result.best_match.name == "visitor:7"
+
+
+def test_a_crowded_frame_among_three_blocks_recognition(monkeypatch):
+    clear = [(100, np.array([1.0, 0.0]))]
+    crowded = [(100, np.array([1.0, 0.0])), (95, np.array([0.0, 1.0]))]
+    service = _service_with_faces(monkeypatch, [clear, crowded, clear])
+    assert service.recognize_images_base64(["AAAA", "AAAA", "AAAA"]).status == "multiple_faces"

@@ -250,6 +250,7 @@ def recognize_face(
     confidence = None
     capture_id = None
     facecheck_suggestions_payload = None
+    multiple_faces = False
 
     logger.info(
         "POST /api/kiosk/recognize-face called (simulate=%s, images=%d)",
@@ -329,14 +330,17 @@ def recognize_face(
                         )
                         for match in capture.web_matches
                     ]
+        elif result.status == "multiple_faces":
+            multiple_faces = True
         # status == "no_face": everything stays None
 
     logger.info(
-        "recognize-face result: recognized=%s visitor_id=%s capture_id=%s facecheck_matches=%d",
+        "recognize-face result: recognized=%s visitor_id=%s capture_id=%s facecheck_matches=%d multiple_faces=%s",
         visitor is not None,
         visitor.visitor_id if visitor else None,
         capture_id,
         len(facecheck_suggestions_payload or []),
+        multiple_faces,
     )
 
     data = RecognizeFaceResponse(
@@ -346,6 +350,7 @@ def recognize_face(
         confidence=confidence,
         capture_id=capture_id,
         facecheck_suggestions=facecheck_suggestions_payload,
+        multiple_faces=multiple_faces,
     )
     return success_response(
         message="Face recognition completed",

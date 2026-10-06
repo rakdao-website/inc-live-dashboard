@@ -43,6 +43,9 @@ class RecognizeFaceResponse(BaseModel):
     confidence: Optional[float] = None
     capture_id: Optional[int] = None
     facecheck_suggestions: Optional[list[FaceCheckSuggestion]] = None
+    # True when two people were in front of the camera: nobody is recognised
+    # and no web search runs; the kiosk asks them to step forward one at a time.
+    multiple_faces: bool = False
 
 
 class ProfileLookupRequest(BaseModel):
