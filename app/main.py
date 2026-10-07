@@ -30,6 +30,7 @@ from app.spacebring_client import spacebring_enabled
 from app.face_recognition_service import FaceRecognitionUnavailable, get_face_recognition_service
 from app.routers.face import router as face_router
 from app.routers.kiosk import router as kiosk_router
+from app.routers.dashboard import router as dashboard_router
 from app.routers.kiosk_flow import router as kiosk_flow_router
 from app.seed import seed_sample_data
 from app.voice_agent.realtime_auth import router as realtime_auth_router
@@ -247,6 +248,7 @@ def database_health_check() -> dict:
 
 
 app.include_router(kiosk_router)
+app.include_router(dashboard_router)
 
 app.include_router(kiosk_flow_router)
 app.include_router(face_router)
