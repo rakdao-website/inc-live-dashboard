@@ -5,7 +5,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, Query, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, Response
-from sqlalchemy import func
+from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -701,6 +701,48 @@ def get_visitor(
         message="Visitor retrieved",
         data=visitor_payload(visitor),
     )
+
+
+@router.get("/upcoming-bookings")
+def get_upcoming_bookings(
+    visitor_id: int = Query(...),
+    limit: int = Query(default=20, ge=1, le=50),
+    db: Session = Depends(get_db),
+):
+    """All of a visitor's bookings that have not ended yet (today onwards), soonest first.
+
+    current-bookings only covers today; the voice agent uses this one to list, move
+    and cancel bookings made for later days. An empty list is a normal answer.
+    """
+    current_date = current_database_date(db)
+    current_time = current_database_time(db)
+    bookings = (
+        db.query(Booking)
+        .filter(
+            Booking.visitor_id == visitor_id,
+            or_(
+                Booking.booking_date > current_date,
+                and_(Booking.booking_date == current_date, Booking.booking_time_end > current_time),
+            ),
+        )
+        .order_by(Booking.booking_date, Booking.booking_time_start)
+        .limit(limit)
+        .all()
+    )
+    data = [
+        KioskBookingRead(
+            booking_id=b.booking_id,
+            booking_type=b.booking_type,
+            booking_name=b.booking_name,
+            booking_date=b.booking_date,
+            booking_time_start=b.booking_time_start,
+            booking_time_end=b.booking_time_end,
+            zone_id=b.zone_id,
+            room_name=getattr(getattr(b, "zone", None), "zone_name", None) or b.booking_name,
+        ).model_dump(mode="json")
+        for b in bookings
+    ]
+    return success_response(message="Upcoming bookings retrieved", data=data)
 
 
 @router.get("/current-booking")
