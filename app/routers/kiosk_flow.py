@@ -1,6 +1,6 @@
 from datetime import date, datetime, time
 import logging
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Query, status
 from fastapi.encoders import jsonable_encoder
@@ -25,6 +25,8 @@ from app.kiosk_flow_schemas import (
     LicenseLookupRequest,
     OtherAssistanceCreate,
     ProfileLookupRequest,
+    RecognitionIssueCreate,
+    TranslateRequest,
     RecognizeFaceRequest,
     RecognizeFaceResponse,
     RoomQuestionRequest,
@@ -47,11 +49,14 @@ from app.kiosk_flow_services import (
     schedule_has_conflict,
     service_to_booking_defaults,
 )
+from app.translation_service import translate_texts
 from app.models import (
     Booking,
     Event,
     FaceProfile,
     OtherAssistanceRequest,
+    RecognitionIssue,
+    UnknownFaceCapture,
     VisitSession,
     VisitorActivity,
     VisitorCheckIn,
@@ -1003,4 +1008,134 @@ def create_other_assistance(
             "reason": request.reason,
             "notes": request.notes,
         },
+    )
+
+
+@router.post("/recognition-issues", status_code=status.HTTP_201_CREATED)
+def create_recognition_issue(
+    payload: RecognitionIssueCreate,
+    db: Session = Depends(get_db),
+):
+    """Kiosk "Report recognition issue": a free-text report, no profile needed."""
+    message = payload.message.strip()
+    if not message:
+        return bad_request_response(
+            message="Please describe what happened.",
+            error_code="EMPTY_MESSAGE",
+        )
+
+    # Keep the links only if they point at real rows, so a stale id from
+    # the kiosk never turns a visitor's report into a failed request.
+    capture_id = (
+        payload.capture_id
+        if payload.capture_id is not None and db.get(UnknownFaceCapture, payload.capture_id) is not None
+        else None
+    )
+    visitor_id = (
+        payload.visitor_id
+        if payload.visitor_id is not None and db.get(Visitor, payload.visitor_id) is not None
+        else None
+    )
+
+    issue = RecognitionIssue(
+        message=message,
+        capture_id=capture_id,
+        visitor_id=visitor_id,
+    )
+    db.add(issue)
+    db.commit()
+    db.refresh(issue)
+
+    return success_response(
+        message="Recognition issue reported",
+        data={
+            "recognition_issue_id": issue.recognition_issue_id,
+            "capture_id": issue.capture_id,
+            "visitor_id": issue.visitor_id,
+            "status": issue.status,
+            "created_at": issue.created_at,
+        },
+    )
+
+
+@router.get("/room-availability")
+def get_room_availability(
+    service_type: str = "meeting_room",
+    booking_date: Optional[date] = None,
+    db: Session = Depends(get_db),
+):
+    """Which times are taken in a service's rooms on a day, plus each room's
+    status right now. Read-only; uses the same schedule the booking route
+    checks for clashes (bookings AND events held in that room), so what the
+    kiosk shows matches what POST /bookings will accept."""
+    day = booking_date or date.today()
+
+    if service_type == "meeting_room":
+        zones = (
+            db.query(Zone)
+            .filter(Zone.zone_type == "meeting_room", Zone.is_bookable.is_(True))
+            .order_by(Zone.zone_id)
+            .all()
+        )
+    else:
+        try:
+            _, default_zone_id, _ = service_to_booking_defaults(service_type)
+        except Exception:  # noqa: BLE001 - unknown service type
+            return bad_request_response(message="Unknown service type", error_code="INVALID_SERVICE")
+        zone = db.get(Zone, default_zone_id)
+        zones = [zone] if zone is not None else []
+
+    now = datetime.now()
+    rooms = []
+    for zone in zones:
+        busy = [
+            (b.booking_time_start, b.booking_time_end)
+            for b in db.query(Booking).filter(Booking.zone_id == zone.zone_id, Booking.booking_date == day)
+        ] + [
+            (e.event_time_start, e.event_time_end)
+            for e in db.query(Event).filter(Event.zone_id == zone.zone_id, Event.event_date == day)
+        ]
+        busy.sort()
+
+        status_now = "closed" if zone.is_closed else "available"
+        busy_until = None
+        if not zone.is_closed and day == now.date():
+            current = now.time()
+            for start, end in busy:
+                if start <= current < end:
+                    status_now = "busy"
+                    busy_until = end
+                # back-to-back bookings: keep extending "busy until"
+                elif busy_until is not None and start <= busy_until < end:
+                    busy_until = end
+
+        rooms.append(
+            {
+                "zone_id": zone.zone_id,
+                "zone_name": zone.zone_name,
+                "status": status_now,
+                "busy_until": busy_until.strftime("%H:%M") if busy_until else None,
+                "busy": [{"start": s.strftime("%H:%M"), "end": e.strftime("%H:%M")} for s, e in busy],
+            }
+        )
+
+    return success_response(
+        message="Room availability",
+        data={"date": day.isoformat(), "rooms": rooms},
+    )
+
+
+@router.post("/translate")
+async def translate_kiosk_texts(
+    payload: TranslateRequest,
+    db: Session = Depends(get_db),
+):
+    """Arabic for kiosk text that isn't in the frontend's translation file
+    (event names, backend messages). Saved translations come back instantly;
+    new ones are translated by Gemini once and saved. Texts that couldn't be
+    translated are simply left out -- the kiosk then shows the English."""
+    translations = await translate_texts(db, payload.texts, payload.target_lang)
+    return success_response(
+        message="Translations",
+        data={"target_lang": payload.target_lang, "translations": translations},
     )

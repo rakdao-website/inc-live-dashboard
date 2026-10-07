@@ -12,6 +12,7 @@ from sqlalchemy import (
     String,
     Text,
     Time,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -399,6 +400,67 @@ class OtherAssistanceRequest(Base):
     )
     reason: Mapped[str] = mapped_column(String(120), nullable=False)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+
+
+class RecognitionIssue(Base):
+    """A visitor's report from the kiosk that face recognition went wrong.
+
+    No visitor profile is required -- the person reporting is usually the
+    one the kiosk failed to recognise.
+    """
+
+    __tablename__ = "recognition_issues"
+    __table_args__ = (
+        CheckConstraint("status IN ('new', 'reviewed', 'resolved')"),
+    )
+
+    recognition_issue_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    # The unmatched face capture from /recognize-face this report is about.
+    capture_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        ForeignKey("unknown_face_captures.capture_id"),
+        nullable=True,
+        index=True,
+    )
+    # Only set when the kiosk had recognised someone (e.g. the wrong person).
+    visitor_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        ForeignKey("visitors.visitor_id"),
+        nullable=True,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        server_default=text("'new'"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+
+
+class TranslationCache(Base):
+    """Automatic translations of changing kiosk text (event names, backend
+    messages), saved so each text is only sent to the AI once."""
+
+    __tablename__ = "translation_cache"
+    __table_args__ = (
+        UniqueConstraint("source_hash", "target_lang"),
+    )
+
+    translation_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    source_text: Mapped[str] = mapped_column(Text, nullable=False)
+    target_lang: Mapped[str] = mapped_column(String(10), nullable=False)
+    translated_text: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
         nullable=False,

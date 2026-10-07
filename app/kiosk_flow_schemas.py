@@ -109,6 +109,17 @@ class OtherAssistanceCreate(BaseModel):
     notes: Optional[str] = None
 
 
+class TranslateRequest(BaseModel):
+    texts: list[str] = Field(..., min_length=1, max_length=50)
+    target_lang: Literal["ar"] = "ar"
+
+
+class RecognitionIssueCreate(BaseModel):
+    message: str = Field(..., min_length=1, max_length=1000)
+    capture_id: Optional[int] = None
+    visitor_id: Optional[int] = None
+
+
 class KioskVisitorRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
