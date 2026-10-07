@@ -27,6 +27,8 @@ from app.kiosk_flow_schemas import (
     KioskBookingReschedule,
     KioskEventRead,
     KioskVisitorRead,
+    PresenceRequest,
+    PresenceResponse,
     LicenseLookupRequest,
     OtherAssistanceCreate,
     ProfileLookupRequest,
@@ -356,6 +358,24 @@ def recognize_face(
         message="Face recognition completed",
         data=data.model_dump(),
     )
+
+@router.post("/presence")
+def detect_presence(payload: PresenceRequest):
+    """Is someone in front of the kiosk camera? Detection only, nothing is stored."""
+    try:
+        faces, ratio = get_face_recognition_service().detect_presence(payload.image_base64)
+    except FaceRecognitionUnavailable as exc:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content=error_response(message=str(exc), error_code="FACE_RECOGNITION_UNAVAILABLE"),
+        )
+    except ValueError:
+        return bad_request_response(message="The camera image could not be read.", error_code="FACE_IMAGE_INVALID")
+    return success_response(
+        message="Presence checked",
+        data=PresenceResponse(faces=faces, face_width_ratio=round(ratio, 3)).model_dump(),
+    )
+
 
 @router.get("/config")
 def get_kiosk_config():

@@ -249,3 +249,48 @@ def test_a_crowded_frame_among_three_blocks_recognition(monkeypatch):
     crowded = [(100, np.array([1.0, 0.0])), (95, np.array([0.0, 1.0]))]
     service = _service_with_faces(monkeypatch, [clear, crowded, clear])
     assert service.recognize_images_base64(["AAAA", "AAAA", "AAAA"]).status == "multiple_faces"
+
+
+def test_presence_reports_faces_and_the_largest_width(monkeypatch):
+    class Det:
+        def detect(self, frame, max_num=0, metric="default"):
+            return np.array([[10, 10, 50, 60, 0.9], [100, 20, 200, 130, 0.95]]), None  # widths 40 and 100
+
+    class App:
+        det_model = Det()
+
+    class Cv2:
+        IMREAD_COLOR = 1
+
+        @staticmethod
+        def imdecode(_a, _m):
+            return np.zeros((240, 320, 3), dtype=np.uint8)  # 320 px wide
+
+    monkeypatch.setitem(__import__("sys").modules, "cv2", Cv2)
+    service = FaceRecognitionService(database=_make_database())
+    service._app = App()
+
+    faces, ratio = service.detect_presence("AAAA")
+
+    assert faces == 2 and abs(ratio - 100 / 320) < 1e-6
+
+
+def test_presence_with_no_face(monkeypatch):
+    class Det:
+        def detect(self, frame, max_num=0, metric="default"):
+            return np.zeros((0, 5)), None
+
+    class App:
+        det_model = Det()
+
+    class Cv2:
+        IMREAD_COLOR = 1
+
+        @staticmethod
+        def imdecode(_a, _m):
+            return np.zeros((240, 320, 3), dtype=np.uint8)
+
+    monkeypatch.setitem(__import__("sys").modules, "cv2", Cv2)
+    service = FaceRecognitionService(database=_make_database())
+    service._app = App()
+    assert service.detect_presence("AAAA") == (0, 0.0)

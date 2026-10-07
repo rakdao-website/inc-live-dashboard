@@ -29,6 +29,15 @@ class RecognizeFaceRequest(BaseModel):
     images_base64: Optional[list[str]] = Field(default=None, min_length=1, max_length=5)
 
 
+class PresenceRequest(BaseModel):
+    image_base64: str = Field(..., min_length=1, max_length=400_000)
+
+
+class PresenceResponse(BaseModel):
+    faces: int
+    face_width_ratio: float
+
+
 class FaceCheckSuggestion(BaseModel):
     rank: int
     source_url: str

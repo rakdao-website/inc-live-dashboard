@@ -259,6 +259,20 @@ class FaceRecognitionService:
         except Exception:
             return None, False
 
+    def detect_presence(self, image_base64: str) -> tuple[int, float]:
+        """(number of faces, width of the largest as a share of the frame width).
+
+        Detection only: no embedding is made, nothing is stored or logged. The kiosk
+        calls this several times a second on a small frame to notice that someone has
+        stepped up to the camera.
+        """
+        frame = self.decode_image_base64(image_base64)
+        boxes, _ = self._face_app().det_model.detect(frame, max_num=0, metric="default")
+        if boxes is None or len(boxes) == 0:
+            return 0, 0.0
+        widest = float(max(box[2] - box[0] for box in boxes))
+        return len(boxes), widest / float(frame.shape[1])
+
     def _embedding_from_image_safe(self, image_base64: str) -> np.ndarray | None:
         return self._analyse_image_safe(image_base64)[0]
 
