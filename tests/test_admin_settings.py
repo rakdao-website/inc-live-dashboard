@@ -196,3 +196,33 @@ def test_unreadable_settings_table_falls_back_to_defaults(monkeypatch):
     monkeypatch.setattr(runtime_settings, "loader", broken)
     runtime_settings.invalidate()
     assert runtime_settings.get("face.match_threshold") == 0.6
+
+
+def test_voice_tuning_defaults_validation_and_kiosk_config(client, login):
+    voice = client.get("/api/kiosk/config").json()["data"]["voice"]
+    assert voice == {
+        "allow_interruptions": True, "interrupt_min_ms": 700, "vad_threshold": 0.7,
+        "silence_ms": 600, "noise_reduction": "near_field",
+    }
+
+    admin = login("super_user")
+    listed = {st["key"]: (g["id"], st["kind"]) for g in admin.get("/admin/settings").json()["data"]["groups"] for st in g["settings"]}
+    assert listed["voice.allow_interruptions"] == ("voice", "bool")  # shown as a toggle in the admin screen
+    assert listed["voice.vad_threshold"] == ("voice", "float") and listed["voice.silence_ms"] == ("voice", "int")
+    assert listed["voice.noise_reduction"] == ("voice", "choice")
+    assert put(admin, "voice.vad_threshold", 0.85).status_code == 200
+    assert put(admin, "voice.silence_ms", 900).status_code == 200
+    assert put(admin, "voice.interrupt_min_ms", 1000).status_code == 200
+    assert put(admin, "voice.allow_interruptions", False).status_code == 200
+    assert put(admin, "voice.noise_reduction", "far_field").status_code == 200
+    after = client.get("/api/kiosk/config").json()["data"]["voice"]
+    assert after == {
+        "allow_interruptions": False, "interrupt_min_ms": 1000, "vad_threshold": 0.85,
+        "silence_ms": 900, "noise_reduction": "far_field",
+    }
+
+    # Out-of-range or wrong-type values are refused and change nothing.
+    for key, bad in (("voice.vad_threshold", 1.5), ("voice.silence_ms", 50), ("voice.interrupt_min_ms", 5000),
+                     ("voice.allow_interruptions", "yes"), ("voice.noise_reduction", "loud")):
+        assert put(admin, key, bad).status_code in (400, 422), key
+    assert client.get("/api/kiosk/config").json()["data"]["voice"] == after

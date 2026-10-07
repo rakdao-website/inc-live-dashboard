@@ -390,6 +390,13 @@ def get_kiosk_config():
                 "enrolment_photos": runtime_settings.get("scan.enrolment_photos"),
             },
             "operating_hours": {"open": open_time.strftime("%H:%M"), "close": close_time.strftime("%H:%M")},
+            "voice": {
+                "allow_interruptions": runtime_settings.get("voice.allow_interruptions"),
+                "interrupt_min_ms": runtime_settings.get("voice.interrupt_min_ms"),
+                "vad_threshold": runtime_settings.get("voice.vad_threshold"),
+                "silence_ms": runtime_settings.get("voice.silence_ms"),
+                "noise_reduction": runtime_settings.get("voice.noise_reduction"),
+            },
         },
     )
 
