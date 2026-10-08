@@ -31,6 +31,9 @@ class Settings(BaseSettings):
         "http://localhost:5500,http://127.0.0.1:5500,"
         "http://localhost:5173,http://127.0.0.1:5173"
     )
+    # Extra origins added to the list above (comma separated), for example the dashboard display's
+    # address: CORS_EXTRA_ORIGINS=http://localhost:3004,https://display.example.com
+    cors_extra_origins: str = ""
 
     # Room Q&A brain. "scripted" needs no key and is the default; set to
     # "gemini" or "grok" and supply the matching key via .env to enable it.

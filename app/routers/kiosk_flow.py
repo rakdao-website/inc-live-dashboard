@@ -397,6 +397,7 @@ def get_kiosk_config():
                 "vad_threshold": runtime_settings.get("voice.vad_threshold"),
                 "silence_ms": runtime_settings.get("voice.silence_ms"),
                 "noise_reduction": runtime_settings.get("voice.noise_reduction"),
+                "model": runtime_settings.get("voice.realtime_model"),
             },
         },
     )

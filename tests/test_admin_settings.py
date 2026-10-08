@@ -205,7 +205,7 @@ def test_voice_tuning_defaults_validation_and_kiosk_config(client, login):
     voice = client.get("/api/kiosk/config").json()["data"]["voice"]
     assert voice == {
         "allow_interruptions": True, "interrupt_min_ms": 700, "vad_threshold": 0.7,
-        "silence_ms": 600, "noise_reduction": "near_field",
+        "silence_ms": 600, "noise_reduction": "near_field", "model": runtime_settings.get("voice.realtime_model"),
     }
 
     admin = login("super_user")
@@ -221,7 +221,7 @@ def test_voice_tuning_defaults_validation_and_kiosk_config(client, login):
     after = client.get("/api/kiosk/config").json()["data"]["voice"]
     assert after == {
         "allow_interruptions": False, "interrupt_min_ms": 1000, "vad_threshold": 0.85,
-        "silence_ms": 900, "noise_reduction": "far_field",
+        "silence_ms": 900, "noise_reduction": "far_field", "model": runtime_settings.get("voice.realtime_model"),
     }
 
     # Out-of-range or wrong-type values are refused and change nothing.

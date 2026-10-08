@@ -124,7 +124,11 @@ app = FastAPI(
 # Browsers may send cookies only from these exact origins (no "null", no wildcard).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in settings.cors_allowed_origins.split(",") if o.strip()],
+    allow_origins=[
+        origin.strip()
+        for origin in f"{settings.cors_allowed_origins},{settings.cors_extra_origins}".split(",")
+        if origin.strip()
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
