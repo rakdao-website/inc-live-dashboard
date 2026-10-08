@@ -78,6 +78,12 @@ def best_embedding_and_bytes(images_base64: list[str]):
     return best_embedding, best_bytes, best_score
 
 
+def _status_text(text: str) -> str:
+    """The web_search_status column holds 40 characters; a longer message would make the save fail
+    and lose the whole capture, so keep the start of it."""
+    return text[:40]
+
+
 def run_web_face_search(
     db: Session,
     capture: UnknownFaceCapture,
@@ -89,10 +95,10 @@ def run_web_face_search(
     try:
         matches = face_web_search.search_web_faces(images_bytes, limit=3)
     except WebFaceSearchUnavailable as exc:
-        capture.web_search_status = f"unavailable: {exc}"
+        capture.web_search_status = _status_text(f"unavailable: {exc}")
         return
     except Exception as exc:  # noqa: BLE001 - external call, never fatal to kiosk
-        capture.web_search_status = f"error: {exc}"
+        capture.web_search_status = _status_text(f"error: {exc}")
         return
 
     for match in matches:
@@ -143,7 +149,7 @@ def create_capture_with_web_search(
         # images turn out to cost extra credits per search.
         max_images = max(1, runtime_settings.get("face.web_search_max_images"))
         frames_to_send = (all_image_bytes or [image_bytes])[:max_images]
-        run_facecheck_search(db, capture, frames_to_send)
+        run_web_face_search(db, capture, frames_to_send)
 
     db.commit()
     db.refresh(capture)
