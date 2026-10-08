@@ -28,7 +28,7 @@ def test_only_super_user_can_open_or_change_settings(login):
 def test_listing_shows_groups_defaults_and_the_current_voice_model(login, monkeypatch):
     monkeypatch.setattr(settings, "openai_realtime_model", "gpt-realtime-2.1")
     data = login("super_user").get("/admin/settings").json()["data"]
-    assert [g["id"] for g in data["groups"]] == ["voice", "face", "scan", "spacebring", "bookings"]
+    assert [g["id"] for g in data["groups"]] == ["voice", "face", "scan", "display", "spacebring", "bookings"]
     by_key = {s["key"]: s for g in data["groups"] for s in g["settings"]}
     assert by_key["voice.realtime_model"]["value"] == "gpt-realtime-2.1"
     assert "gpt-realtime-2.1" in by_key["voice.realtime_model"]["choices"]
@@ -164,6 +164,9 @@ def test_kiosk_config_is_public_and_follows_the_settings(client, login):
     after = client.get("/api/kiosk/config").json()["data"]
     assert after["face_scan"]["duration_ms"] == 2500 and after["face_scan"]["enrolment_photos"] == 4
     assert after["operating_hours"] == {"open": "08:30", "close": "17:00"}
+    assert before.json()["data"]["display"] == {"stretch_to_screen": True}
+    put(admin, "display.stretch_to_screen", False)
+    assert client.get("/api/kiosk/config").json()["data"]["display"] == {"stretch_to_screen": False}
 
 
 def test_spacebring_sync_setting_and_sync_now(login, db, monkeypatch):

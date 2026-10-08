@@ -389,6 +389,7 @@ def get_kiosk_config():
                 "recognition_photos": runtime_settings.get("scan.recognition_photos"),
                 "enrolment_photos": runtime_settings.get("scan.enrolment_photos"),
             },
+            "display": {"stretch_to_screen": runtime_settings.get("display.stretch_to_screen")},
             "operating_hours": {"open": open_time.strftime("%H:%M"), "close": close_time.strftime("%H:%M")},
             "voice": {
                 "allow_interruptions": runtime_settings.get("voice.allow_interruptions"),

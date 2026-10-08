@@ -58,6 +58,7 @@ GROUP_TITLES = {
     "voice": "Voice agent",
     "face": "Face recognition",
     "scan": "Kiosk face scan",
+    "display": "Kiosk display",
     "spacebring": "Spacebring",
     "bookings": "Bookings and events",
 }
@@ -120,6 +121,10 @@ DEFINITIONS: tuple[Definition, ...] = (
                "int", lambda: 3, minimum=1, maximum=3, effect="Applies when a kiosk screen next loads.", order=2),
     Definition("scan.enrolment_photos", "scan", "Photos for enrolment", "Photos taken when saving a new person's face.",
                "int", lambda: 3, minimum=1, maximum=5, effect="Applies when a kiosk screen next loads.", order=3),
+
+    Definition("display.stretch_to_screen", "display", "Stretch to fill the screen", "On: the kiosk page is stretched to cover the whole screen edge to edge (for the tall vertical kiosk display). Off: it keeps its 9:16 shape and is centred with bars at the sides (for a laptop or desktop monitor).",
+               "bool", lambda: True,
+               effect="Applies when a kiosk screen next loads. A kiosk that is already open picks it up after a refresh.", order=1),
 
     Definition("spacebring.sync_enabled", "spacebring", "Automatic Spacebring sync", "Pull bookings made or changed in Spacebring into the local copy.",
                "bool", lambda: settings.spacebring_sync_interval_seconds > 0,
