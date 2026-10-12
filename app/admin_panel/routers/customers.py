@@ -10,7 +10,7 @@ from app.admin_panel.audit import record_audit
 from app.admin_panel.deps import AdminPrincipal, admin_gate
 from app.admin_panel.responses import failure, success
 from app.database import get_db
-from app.models import Visitor, VisitorCheckIn
+from app.models import VisitSession, Visitor
 from app.privacy_mask import mask_email, mask_phone
 from app.session_log import KioskSession
 
@@ -47,7 +47,7 @@ def _session_counts(db: Session, ids: list[int]) -> dict[int, int]:
 def _visit_counts(db: Session, ids: list[int]) -> dict[int, int]:
     if not ids:
         return {}
-    rows = db.query(VisitorCheckIn.visitor_id, func.count()).filter(VisitorCheckIn.visitor_id.in_(ids)).group_by(VisitorCheckIn.visitor_id).all()
+    rows = db.query(VisitSession.visitor_id, func.count()).filter(VisitSession.visitor_id.in_(ids)).group_by(VisitSession.visitor_id).all()
     return {vid: n for vid, n in rows}
 
 
@@ -72,7 +72,7 @@ def list_customers(
     if sort == "recent":
         query = query.order_by(Visitor.last_visit_at.desc().nullslast(), Visitor.visitor_name)
     elif sort == "visits":
-        visit_total = db.query(VisitorCheckIn.visitor_id.label("vid"), func.count().label("n")).group_by(VisitorCheckIn.visitor_id).subquery()
+        visit_total = db.query(VisitSession.visitor_id.label("vid"), func.count().label("n")).group_by(VisitSession.visitor_id).subquery()
         query = query.outerjoin(visit_total, visit_total.c.vid == Visitor.visitor_id).order_by(func.coalesce(visit_total.c.n, 0).desc(), Visitor.visitor_name)
     else:
         query = query.order_by(Visitor.visitor_name)
@@ -93,8 +93,8 @@ def get_customer(visitor_id: int, request: Request, principal: AdminPrincipal = 
     record_audit(db, principal, "customers.view", "customer", visitor_id, request=request)
     db.commit()
     recent_visits = (
-        db.query(VisitorCheckIn).filter(VisitorCheckIn.visitor_id == visitor_id)
-        .order_by(VisitorCheckIn.check_in_time.desc()).limit(50).all()
+        db.query(VisitSession).filter(VisitSession.visitor_id == visitor_id)
+        .order_by(VisitSession.check_in_time.desc()).limit(50).all()
     )
     sessions = (
         db.query(KioskSession).filter(KioskSession.visitor_id == visitor_id)
@@ -102,8 +102,9 @@ def get_customer(visitor_id: int, request: Request, principal: AdminPrincipal = 
     )
     data = _payload(visitor, len(sessions) if len(sessions) < 50 else _session_counts(db, [visitor_id]).get(visitor_id, 0), _visit_counts(db, [visitor_id]).get(visitor_id, 0))
     data["recent_visits"] = [
-        {"check_in_id": v.check_in_id, "at": v.check_in_time.isoformat() if v.check_in_time else None,
-         "status": v.check_in_status, "method": v.match_method, "service": v.selected_service}
+        {"visit_id": v.visit_session_id, "at": v.check_in_time.isoformat() if v.check_in_time else None,
+         "method": v.recognition_method, "service": v.current_selected_service, "purpose": v.visit_purpose,
+         "returning": bool(v.is_returning_visitor)}
         for v in recent_visits
     ]
     data["recent_sessions"] = [

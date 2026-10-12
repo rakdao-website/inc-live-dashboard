@@ -175,14 +175,14 @@ def test_only_super_user_reads_the_audit_log(login):
 
 def test_one_customer_many_visits_are_kept_together(client, login, db):
     from datetime import datetime, timedelta
-    from app.models import VisitorCheckIn
+    from app.models import VisitSession
 
     a = make_visitor(db)
     b = make_visitor(db, name="Omar Hassan", phone="+971551112233", email="omar@example.com")
     now = datetime.utcnow()
     for days in (3, 2, 1):
-        db.add(VisitorCheckIn(visitor_id=a.visitor_id, check_in_time=now - timedelta(days=days), check_in_status="booking_found", match_method="face"))
-    db.add(VisitorCheckIn(visitor_id=b.visitor_id, check_in_status="no_booking_found", match_method="phone"))
+        db.add(VisitSession(visitor_id=a.visitor_id, check_in_time=now - timedelta(days=days), recognition_method="face", is_returning_visitor=True))
+    db.add(VisitSession(visitor_id=b.visitor_id, recognition_method="phone"))
     db.commit()
     first = client.post("/api/kiosk/sessions", json={"visitor_id": a.visitor_id}).json()["data"]["session_id"]
     client.post("/api/kiosk/sessions", json={"visitor_id": a.visitor_id})
@@ -193,7 +193,7 @@ def test_one_customer_many_visits_are_kept_together(client, login, db):
     assert [i["name"] for i in admin.get("/admin/customers", params={"sort": "visits"}).json()["data"]["items"]][0] == "Aisha Khan"
 
     detail = admin.get(f"/admin/customers/{a.visitor_id}").json()["data"]
-    assert [v["status"] for v in detail["recent_visits"]] == ["booking_found"] * 3
+    assert [v["method"] for v in detail["recent_visits"]] == ["face"] * 3
     assert detail["recent_visits"][0]["at"] > detail["recent_visits"][1]["at"]  # newest first
     assert {s["session_id"] for s in detail["recent_sessions"]} >= {first}
     assert "aisha@example.com" not in str(detail)
