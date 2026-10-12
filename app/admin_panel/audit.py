@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from sqlalchemy.orm import Session
 
+from app.admin_panel import audit_chain  # noqa: F401  (registers the hash-chain listener)
 from app.admin_panel.models import AdminAuditLog
 
 logger = logging.getLogger("admin.audit")

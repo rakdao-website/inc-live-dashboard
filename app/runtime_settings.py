@@ -61,6 +61,7 @@ GROUP_TITLES = {
     "display": "Kiosk display",
     "spacebring": "Spacebring",
     "bookings": "Bookings and events",
+    "sessions": "Conversation logs",
 }
 
 REALTIME_MODELS = tuple(
@@ -113,6 +114,12 @@ DEFINITIONS: tuple[Definition, ...] = (
                confirm="Turning demo mode off makes every search use real credits.", order=3),
     Definition("face.web_search_max_images", "face", "Photos per web search", "How many of the scan photos are sent for one search. Extra photos of the same person do not cost extra credits.",
                "int", lambda: settings.face_web_search_max_images, minimum=1, maximum=5, order=4),
+
+    Definition("sessions.store_transcripts", "sessions", "Keep conversation logs", "Save what the visitor and the voice assistant said, with emails and phone numbers masked, so staff can review a session.",
+               "bool", lambda: True, confirm="Switching this off stops new conversations from being logged. Existing logs stay until they expire.",
+               effect="Applies to the next voice conversation.", order=1),
+    Definition("sessions.retention_days", "sessions", "Keep logs for", "Conversation logs older than this are deleted automatically. The audit log is never deleted.",
+               "int", lambda: 90, minimum=7, maximum=730, unit="days", order=2),
 
     Definition("scan.duration_ms", "scan", "Scan duration", "How long the scanning ring runs on the kiosk.",
                "int", lambda: 1800, minimum=800, maximum=6000, unit="ms",

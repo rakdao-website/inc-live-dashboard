@@ -1,6 +1,7 @@
 from datetime import date, datetime, time
 from typing import Optional
 
+from sqlalchemy import event
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -161,6 +162,10 @@ class Visitor(Base):
     visitor_name: Mapped[str] = mapped_column(String(150), nullable=False)
     visitor_phone: Mapped[str] = mapped_column(String(40), nullable=False, unique=True, index=True)
     visitor_email: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    # Masked copies for screens that must not show the real value (customer list). Kept in step
+    # with the real columns by the listener at the bottom of this file.
+    email_masked: Mapped[Optional[str]] = mapped_column(String(160), nullable=True)
+    phone_masked: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)
     license_number: Mapped[Optional[str]] = mapped_column(String(80), nullable=True, unique=True, index=True)
     visitor_type: Mapped[str] = mapped_column(
         String(20),
@@ -661,3 +666,11 @@ class LiveActivityFeed(Base):
     booking_id: Mapped[Optional[int]] = mapped_column(BigInteger)
     booking_name: Mapped[Optional[str]] = mapped_column(String(200))
     display_message: Mapped[str] = mapped_column(String)
+
+@event.listens_for(Visitor, "before_insert")
+@event.listens_for(Visitor, "before_update")
+def _refresh_masked_contacts(_mapper, _connection, visitor: Visitor) -> None:
+    from app.privacy_mask import mask_email, mask_phone
+
+    visitor.email_masked = mask_email(visitor.visitor_email)
+    visitor.phone_masked = mask_phone(visitor.visitor_phone)

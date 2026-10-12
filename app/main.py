@@ -18,7 +18,9 @@ from app.admin_panel.responses import AdminHTTPError, admin_http_error_handler
 from app.admin_panel.routers import approvals as admin_approvals_router
 from app.admin_panel.routers import audit_log as admin_audit_router
 from app.admin_panel.routers import auth as admin_auth_router
+from app.admin_panel.routers import customers as admin_customers_router
 from app.admin_panel.routers import dashboard as admin_dashboard_router
+from app.admin_panel.routers import sessions as admin_sessions_router
 from app.admin_panel.routers import settings as admin_settings_router
 from app.admin_panel.routers import users as admin_users_router
 from app.admin_panel.security import get_session_secret
@@ -30,6 +32,7 @@ from app.spacebring_client import spacebring_enabled
 from app.face_recognition_service import FaceRecognitionUnavailable, get_face_recognition_service
 from app.routers.face import router as face_router
 from app.routers.kiosk import router as kiosk_router
+from app.routers.kiosk_sessions import router as kiosk_sessions_router
 from app.routers.dashboard import router as dashboard_router
 from app.routers.kiosk_flow import router as kiosk_flow_router
 from app.seed import seed_sample_data
@@ -263,6 +266,9 @@ app.include_router(admin_approvals_router.router)
 app.include_router(admin_users_router.router)
 app.include_router(admin_settings_router.router)
 app.include_router(admin_audit_router.router)
+app.include_router(admin_customers_router.router)
+app.include_router(admin_sessions_router.router)
+app.include_router(kiosk_sessions_router)
 
 # Local browser smoke tester: camera, face detect, voice room Q&A, bookings.
 if FE_TEST_DIR.is_dir():

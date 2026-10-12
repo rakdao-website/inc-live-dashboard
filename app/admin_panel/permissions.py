@@ -19,6 +19,7 @@ R = {READ}
 ALL_RESOURCES = (
     "dashboard", "approvals", "captures", "people", "erasure", "bookings", "rooms",
     "events", "activity", "ecosystem", "audit", "integrations", "privacy", "users", "settings",
+    "customers", "sessions",
 )
 
 ROLE_PERMISSIONS: dict[str, dict[str, set[str]]] = {
@@ -32,11 +33,14 @@ ROLE_PERMISSIONS: dict[str, dict[str, set[str]]] = {
         "captures": RW,
         "activity": R,
         "integrations": R,
+        "customers": R,
     },
     "reviewer": {
         "dashboard": R,
         "approvals": RW,
         "captures": RW,
+        "customers": R,
+        "sessions": R,
     },
     "read_only": {
         "dashboard": R,
@@ -46,6 +50,7 @@ ROLE_PERMISSIONS: dict[str, dict[str, set[str]]] = {
         "events": R,
         "activity": R,
         "integrations": R,
+        "customers": R,
     },
 }
 
@@ -59,6 +64,8 @@ _PATH_RESOURCES: tuple[tuple[str, str], ...] = (
     ("/admin/users", "users"),
     ("/admin/settings", "settings"),
     ("/admin/audit-log", "audit"),
+    ("/admin/customers", "customers"),
+    ("/admin/sessions", "sessions"),
     ("/admin/integrations", "integrations"),
     ("/admin/privacy", "privacy"),
     ("/admin/zones", "rooms"),

@@ -54,6 +54,10 @@ class AdminAuditLog(Base):
     detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     ip_address: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     occurred_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"), index=True)
+    # Tamper evidence: each row's hash covers its content and the previous row's hash (see audit_chain.py).
+    prev_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    row_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    category: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, index=True)  # auth | data_access | change | privacy | system
 
 
 class VisitorApproval(Base):
