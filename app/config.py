@@ -55,6 +55,9 @@ class Settings(BaseSettings):
     # detected face doesn't match anyone in our gallery and this is enabled,
     # we query the provider for the top public-web candidates for a human to
     # review. Disabled or unconfigured just returns "no web matches".
+    # Server-side master switch. While false, FaceCheck.ID web search cannot run and the admin
+    # panel cannot switch it on. Set FACE_WEB_SEARCH_ALLOWED=true to make the feature available again.
+    face_web_search_allowed: bool = False
     face_web_search_enabled: bool = False
     face_web_search_provider: str = "facecheck"
     facecheck_api_token: str = ""

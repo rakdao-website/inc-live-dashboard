@@ -49,7 +49,8 @@ class WebFaceMatch:
 
 def is_enabled() -> bool:
     return bool(
-        runtime_settings.get("face.web_search_enabled")
+        settings.face_web_search_allowed
+        and runtime_settings.get("face.web_search_enabled")
         and settings.face_web_search_provider == "facecheck"
         and settings.facecheck_api_token
     )

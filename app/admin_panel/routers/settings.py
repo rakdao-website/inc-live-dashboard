@@ -39,7 +39,7 @@ def _definition_payload(definition: rs.Definition, overrides: dict[str, Any], ro
         "unit": definition.unit,
         "confirm": definition.confirm,
         "effect": definition.effect,
-        "value": rs.get(definition.key),
+        "value": False if definition.key == "face.web_search_enabled" and not settings.face_web_search_allowed else rs.get(definition.key),
         "default": definition.default(),
         "source": "database" if definition.key in overrides else "default",
         "updated_by": getattr(row, "updated_by_username", None),
@@ -50,6 +50,7 @@ def _definition_payload(definition: rs.Definition, overrides: dict[str, Any], ro
 def _status() -> dict:
     """Facts shown next to the switches. Only yes/no and labels, never keys or tokens."""
     return {
+        "facecheck_allowed": settings.face_web_search_allowed,
         "facecheck_token_configured": bool(settings.facecheck_api_token),
         "openai_key_configured": bool(settings.openai_api_key),
         "gemini_key_configured": bool(getattr(settings, "gemini_api_key", "")),
@@ -76,6 +77,8 @@ def list_settings(db: Session = Depends(get_db)):
 
 
 def _precondition_problem(key: str, value: Any) -> tuple[str, str] | None:
+    if key == "face.web_search_enabled" and value is True and not settings.face_web_search_allowed:
+        return "FaceCheck.ID web search is disabled on the server and cannot be switched on.", "FACECHECK_DISABLED"
     if key == "face.web_search_enabled" and value is True and not settings.facecheck_api_token:
         return "FACECHECK_API_TOKEN is not set on the server, so web search cannot be switched on.", "FACECHECK_TOKEN_MISSING"
     if key == "voice.text_provider":

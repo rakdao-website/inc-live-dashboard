@@ -28,7 +28,7 @@ def test_only_super_user_can_open_or_change_settings(login):
 def test_listing_shows_groups_defaults_and_the_current_voice_model(login, monkeypatch):
     monkeypatch.setattr(settings, "openai_realtime_model", "gpt-realtime-2.1")
     data = login("super_user").get("/admin/settings").json()["data"]
-    assert [g["id"] for g in data["groups"]] == ["voice", "face", "scan", "display", "spacebring", "bookings"]
+    assert [g["id"] for g in data["groups"]] == ["voice", "face", "scan", "display", "spacebring", "bookings", "sessions"]
     by_key = {s["key"]: s for g in data["groups"] for s in g["settings"]}
     assert by_key["voice.realtime_model"]["value"] == "gpt-realtime-2.1"
     assert "gpt-realtime-2.1" in by_key["voice.realtime_model"]["choices"]
@@ -115,7 +115,22 @@ def test_opening_must_be_before_closing(login):
     assert runtime_settings.get("bookings.open_time") == "09:00"
 
 
+def test_facecheck_is_off_by_default_and_cannot_be_switched_on(login, monkeypatch):
+    monkeypatch.setattr(settings, "facecheck_api_token", "tok")
+    monkeypatch.setattr(settings, "face_web_search_provider", "facecheck")
+    assert settings.face_web_search_allowed is False
+    admin = login("super_user")
+    refused = put(admin, "face.web_search_enabled", True)
+    assert refused.status_code == 409 and refused.json()["error_code"] == "FACECHECK_DISABLED"
+    assert face_web_search.is_enabled() is False
+    data = admin.get("/admin/settings").json()["data"]
+    assert data["status"]["facecheck_allowed"] is False
+    shown = {s["key"]: s for g in data["groups"] for s in g["settings"]}
+    assert shown["face.web_search_enabled"]["value"] is False
+
+
 def test_facecheck_switch_needs_a_server_token_and_drives_the_search(login, monkeypatch):
+    monkeypatch.setattr(settings, "face_web_search_allowed", True)
     admin = login("super_user")
     monkeypatch.setattr(settings, "facecheck_api_token", "")
     refused = put(admin, "face.web_search_enabled", True)
@@ -131,6 +146,7 @@ def test_facecheck_switch_needs_a_server_token_and_drives_the_search(login, monk
 
 
 def test_demo_mode_setting_reaches_the_quota_report(login, monkeypatch):
+    monkeypatch.setattr(settings, "face_web_search_allowed", True)
     monkeypatch.setattr(settings, "face_web_search_testing_mode", False)
     assert face_web_search.get_account_info()["demo_mode"] is False
     put(login("super_user"), "face.web_search_demo_mode", True)
