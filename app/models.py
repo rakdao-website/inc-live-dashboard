@@ -106,6 +106,8 @@ class Event(Base):
     )
     event_organizer: Mapped[str] = mapped_column(String(150), nullable=False)
     event_attendee_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Set when the event comes from Spacebring (the system of record for those events).
+    spacebring_event_id: Mapped[Optional[str]] = mapped_column(String(40), nullable=True, unique=True)
 
     zone: Mapped[Zone] = relationship(back_populates="events")
 

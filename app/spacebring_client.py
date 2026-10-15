@@ -155,6 +155,29 @@ class SpacebringClient:
             params["companyRef"] = company_id
         return self._request("GET", "/community/memberships/v1", params=params).get("memberships", [])
 
+    # --- events ----------------------------------------------------------
+    def list_events(
+        self,
+        *,
+        location_id: str | None = None,
+        starts_from: datetime | None = None,
+        limit: int = 100,
+        max_pages: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Events at the location starting from `starts_from`, following pagination."""
+        params: dict[str, Any] = {"locationRef": location_id or self.location_id, "limit": min(limit, 100), "order": "startDate:asc"}
+        if starts_from is not None:
+            params["startDate[gte]"] = to_spacebring_datetime(starts_from)
+        events: list[dict[str, Any]] = []
+        for _ in range(max_pages):
+            data = self._request("GET", "/events/v1", params=params)
+            events.extend(data.get("events", []))
+            token = data.get("nextPageToken")
+            if not token:
+                return events
+            params = {**params, "nextPageToken": token}
+        raise SpacebringError("Too many pages of events; narrow the window")
+
     # --- bookings --------------------------------------------------------
     def create_booking(
         self,

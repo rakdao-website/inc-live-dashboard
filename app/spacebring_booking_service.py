@@ -1,8 +1,7 @@
 """Booking flow against Spacebring (system of record) for the kiosk.
 
 Postgres keeps a mirror row per booking. Zones without a
-spacebring_resource_id (for example the meeting rooms, which do not exist in
-Spacebring yet) keep using the local booking path.
+spacebring_resource_id (rooms not created in Spacebring) keep using the local booking path.
 """
 from __future__ import annotations
 

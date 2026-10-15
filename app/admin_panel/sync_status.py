@@ -30,10 +30,16 @@ def snapshot() -> dict:
 def run_spacebring_sync(db):
     """One sync pass. Records the outcome for the dashboard and re-raises failures."""
     from app.spacebring_client import get_spacebring_client
-    from app.spacebring_sync import sync_bookings
+    from app.spacebring_sync import sync_bookings, sync_events
 
     try:
-        result = sync_bookings(db, get_spacebring_client())
+        client = get_spacebring_client()
+        result = sync_bookings(db, client)
+        try:
+            sync_events(db, client, result)
+        except Exception as exc:  # events must not stop the booking sync from reporting
+            db.rollback()
+            result.skipped.append(f"events: {str(exc)[:80]}")
     except Exception as exc:
         record_error(str(exc))
         raise

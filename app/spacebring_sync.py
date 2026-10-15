@@ -9,19 +9,22 @@ It reconciles upcoming bookings only (from the start of today, local time):
   * in Spacebring, not in Postgres      -> insert a mirror row
   * in both, times differ               -> update the mirror
   * in Postgres, cancelled/gone in SB   -> delete the mirror
-It never touches rows without a spacebring_booking_id (meeting rooms, legacy).
+It never touches rows without a spacebring_booking_id (legacy rows made before the link).
+
+Events are mirrored the same way (`sync_events`): upcoming and today's Spacebring events appear in the
+kiosk's events list, changed ones are updated, removed ones are deleted. Events made locally are untouched.
 """
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as dtime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import ActivityFeed, Booking, VisitorCheckIn, Zone
+from app.models import ActivityFeed, Booking, Event, VisitorCheckIn, Zone
 from app.spacebring_client import SpacebringClient, SpacebringError
 
 logger = logging.getLogger("spacebring.sync")
@@ -39,11 +42,15 @@ class SyncResult:
     updated: int = 0
     deleted: int = 0
     skipped: list[str] = field(default_factory=list)
+    events_created: int = 0
+    events_updated: int = 0
+    events_deleted: int = 0
 
     def __str__(self) -> str:
         return (
             f"created={self.created} updated={self.updated} deleted={self.deleted} "
-            f"skipped={len(self.skipped)}"
+            f"skipped={len(self.skipped)} events(created={self.events_created} "
+            f"updated={self.events_updated} deleted={self.events_deleted})"
         )
 
 
@@ -154,3 +161,80 @@ def _is_gone(client: SpacebringClient, spacebring_id: str) -> bool:
     except SpacebringError as exc:
         return exc.status_code == 404
     return booking.get("status") == "canceled"
+
+
+EVENT_ORGANIZER = "Innovation City"
+
+
+def _event_status(start: datetime, end: datetime, now: datetime) -> str:
+    return "ended" if now >= end else "live" if now >= start else "upcoming"
+
+
+def sync_events(db: Session, client: SpacebringClient, result: SyncResult | None = None, now: datetime | None = None) -> SyncResult:
+    """Mirror Spacebring events (today onwards) into `events`. The attendee count only ever goes up,
+    so kiosk selections are not lost when Spacebring has fewer sign-ups."""
+    result = result or SyncResult()
+    tz = ZoneInfo(settings.spacebring_timezone)
+    now = now or datetime.now(timezone.utc)
+    window_start_local = now.astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    remote = client.list_events(starts_from=window_start_local.astimezone(timezone.utc))  # fetch first: an outage deletes nothing
+    zone = db.query(Zone).filter(Zone.zone_type == "event_space").order_by(Zone.zone_id).first()
+    if zone is None:
+        result.skipped.append("events (no event_space zone)")
+        return result
+
+    mirrors = {e.spacebring_event_id: e for e in db.query(Event).filter(Event.spacebring_event_id.isnot(None), Event.event_date >= window_start_local.date()).all()}
+    seen: set[str] = set()
+    for sb in remote:
+        start = _parse_utc(sb["startDate"]).astimezone(tz)
+        end = _parse_utc(sb["endDate"]).astimezone(tz)
+        if end.date() != start.date() or end.time() <= start.time():
+            result.skipped.append(f"event {sb['id']} (multi-day)")
+            continue
+        seen.add(sb["id"])
+        values = {
+            "event_name": (sb.get("title") or "Event")[:200],
+            "event_date": start.date(),
+            "event_time_start": start.time().replace(microsecond=0),
+            "event_time_end": end.time().replace(microsecond=0),
+            "event_location": (sb.get("venue") or zone.zone_name or "Event Area")[:120],
+            "event_status": _event_status(start, end, now.astimezone(tz)),
+        }
+        attendees = int(sb.get("attendees") or 0)
+        mirror = mirrors.get(sb["id"])
+        if mirror is None:
+            db.add(Event(zone_id=zone.zone_id, event_organizer=EVENT_ORGANIZER, event_attendee_count=attendees, spacebring_event_id=sb["id"], **values))
+            result.events_created += 1
+            continue
+        changed = False
+        for key, value in values.items():
+            if getattr(mirror, key) != value:
+                setattr(mirror, key, value)
+                changed = True
+        if attendees > (mirror.event_attendee_count or 0):
+            mirror.event_attendee_count = attendees
+            changed = True
+        result.events_updated += int(changed)
+
+    for spacebring_id, mirror in mirrors.items():
+        if spacebring_id in seen:
+            continue
+        if not _event_is_gone(client, spacebring_id):
+            continue
+        db.query(VisitorCheckIn).filter(VisitorCheckIn.event_id == mirror.event_id).update({VisitorCheckIn.event_id: None})
+        db.query(ActivityFeed).filter(ActivityFeed.event_id == mirror.event_id).update({ActivityFeed.event_id: None})
+        db.delete(mirror)
+        result.events_deleted += 1
+
+    db.commit()
+    return result
+
+
+def _event_is_gone(client: SpacebringClient, spacebring_id: str) -> bool:
+    """A mirrored event missing from the list: only a 404 from Spacebring proves it was deleted."""
+    try:
+        client._request("GET", f"/events/v1/{spacebring_id}")
+    except SpacebringError as exc:
+        return exc.status_code == 404
+    return False
