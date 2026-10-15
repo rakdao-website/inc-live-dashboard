@@ -17,6 +17,8 @@ ZONE_TO_SPACEBRING_TITLE: dict[str, str] = {
     "TTS_4": "TikTok LIVE | Battle Room 1",
     "TTS_5": "TikTok LIVE | Battle Room 2",
     "POD_1": "Podcast Room",
+    "MR_1": "Meeting Room 1",
+    "MR_2": "Meeting Room 2",
 }
 
 # Rooms the TikTok service may book (the kiosk picks one of these).
