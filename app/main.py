@@ -18,6 +18,7 @@ from app.admin_panel.responses import AdminHTTPError, admin_http_error_handler
 from app.admin_panel.routers import approvals as admin_approvals_router
 from app.admin_panel.routers import audit_log as admin_audit_router
 from app.admin_panel.routers import auth as admin_auth_router
+from app.admin_panel.routers import bookings as admin_bookings_router
 from app.admin_panel.routers import customers as admin_customers_router
 from app.admin_panel.routers import dashboard as admin_dashboard_router
 from app.admin_panel.routers import sessions as admin_sessions_router
@@ -267,6 +268,8 @@ app.include_router(admin_users_router.router)
 app.include_router(admin_settings_router.router)
 app.include_router(admin_audit_router.router)
 app.include_router(admin_customers_router.router)
+app.include_router(admin_bookings_router.bookings_router)
+app.include_router(admin_bookings_router.rooms_router)
 app.include_router(admin_sessions_router.router)
 app.include_router(kiosk_sessions_router)
 
@@ -275,6 +278,3 @@ if FE_TEST_DIR.is_dir():
     app.mount("/fe-test", StaticFiles(directory=str(FE_TEST_DIR), html=True), name="fe-test")
 
 app.include_router(realtime_auth_router, prefix="/voice-agent")
-
-
-
